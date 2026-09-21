@@ -1,0 +1,2 @@
+"""Unified FastAPI application package."""
+

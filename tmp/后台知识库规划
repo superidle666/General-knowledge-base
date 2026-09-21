@@ -1,0 +1,206 @@
+下面是“后台规则层”的实施计划，范围先限定在知识库管理、文档管理和导入任务管理，不立即改造切片、向量检索，也暂不引入 Redis。后续可直接按此计划执行。
+
+## 一、目标
+
+建立统一的知识库规则，使后台能够明确：
+
+- 知识库属于哪类内容；
+- 是否启用实体识别；
+- 哪些文件可以上传；
+- 文档当前是否可检索；
+- 导入任务处于什么阶段；
+- 谁可以执行上传、重试、删除等操作。
+
+“导入任务管理” :codex-annotation{index="1"} 作为独立模块实现，不再只依赖内存中的任务状态。
+
+## 二、第一阶段：现状梳理
+
+检查并确认：
+
+- `KnowledgeBase`、`Document`、`DocumentChunk` 当前字段；
+- 现有文档上传、删除、列表接口；
+- 前端知识库管理和文档管理页面；
+- 现有权限编码；
+- 文档状态与操作日志的兼容关系。
+
+本阶段只读检查，不修改业务行为。
+
+## 三、第二阶段：知识库规则模型
+
+为知识库增加：
+
+- `content_type`：`general`、`product`、`mixed`
+- `entity_recognition_mode`：`disabled`、`optional`、`required`
+- `allowed_file_types`
+- `max_file_size_mb`
+- `max_document_count`
+- `chunking_config`
+- `visibility`
+
+默认规则：
+
+- 通用资料库：`general + disabled`
+- 产品手册库：`product + optional`
+- 混合资料库：`mixed + optional`
+
+只有确实要求型号精确匹配时，才允许设置为 `required`。
+
+同时增加后端枚举校验，禁止写入未知状态或未知配置值。
+
+## 四、第三阶段：文档状态规范
+
+统一 `Document.status`：
+
+- `uploaded`：文件已保存，尚未处理
+- `processing`：正在导入
+- `ready`：可检索
+- `failed`：处理失败
+- `deleted`：软删除
+
+已有数据需要通过迁移或初始化脚本映射到新状态，不能破坏历史文档。
+
+## 五、第四阶段：导入任务模型
+
+新增 `ImportTask` 表，至少包含：
+
+- `id`
+- `library_id`
+- `document_id`
+- `status`
+- `current_step`
+- `progress`
+- `config_snapshot`
+- `entity_result`
+- `chunk_count`
+- `error_message`
+- `created_by`
+- `created_at`
+- `started_at`
+- `finished_at`
+
+任务状态只允许按规定流转：
+
+```text
+queued -> processing -> completed
+queued -> cancelled
+processing -> failed
+processing -> cancelled
+failed -> queued
+```
+
+创建任务时保存知识库配置快照，避免管理员中途修改规则导致同一任务前后使用不同配置。
+
+## 六、第五阶段：后台接口规则
+
+知识库接口：
+
+- `GET /api/v1/libraries`
+- `POST /api/v1/libraries`
+- `PATCH /api/v1/libraries/{id}`
+- `DELETE /api/v1/libraries/{id}`
+
+文档与任务接口：
+
+- `POST /api/v1/libraries/{library_id}/documents`
+- `GET /api/v1/documents`
+- `GET /api/v1/import-tasks`
+- `GET /api/v1/import-tasks/{id}`
+- `POST /api/v1/import-tasks/{id}/retry`
+- `POST /api/v1/import-tasks/{id}/cancel`
+- `POST /api/v1/documents/{id}/reimport`
+- `DELETE /api/v1/documents/{id}`
+
+上传接口必须校验：
+
+- 知识库是否启用；
+- 当前用户是否有上传权限；
+- 文件扩展名；
+- 文件大小；
+- 文档数量上限；
+- 同一知识库内文件哈希是否重复。
+
+上传成功后，应在同一事务中创建 `Document` 和 `ImportTask(queued)`。
+
+## 七、第六阶段：权限与审计
+
+使用已有权限体系，明确使用：
+
+- `library:view`
+- `library:manage`
+- `document:view`
+- `document:upload`
+- `document:modify`
+- `document:delete`
+
+导入任务操作复用所属知识库的文档权限。
+
+以下操作写入操作日志：
+
+- 新增、修改、停用、启用知识库；
+- 上传文档；
+- 重试、取消导入任务；
+- 重新导入文档；
+- 删除、恢复文档。
+
+日志资源应显示具体知识库名、文档名和任务 ID，不只显示数字 ID。
+
+## 八、第七阶段：后台页面
+
+知识库管理页面新增“导入规则”区域：
+
+- 内容类型；
+- 实体识别模式；
+- 文件类型；
+- 单文件大小；
+- 文档数量上限；
+- 切片配置。
+
+文档管理页面显示：
+
+- 文档名称；
+- 所属知识库；
+- 文档状态；
+- 导入进度；
+- 分块数；
+- 实体识别结果摘要；
+- 失败原因；
+- 最近处理时间；
+- 重试、取消、重新导入、删除操作。
+
+通用知识库不显示或弱化“商品名称”概念，避免误导管理员。
+
+## 九、第八阶段：迁移与测试
+
+执行：
+
+1. SQLAlchemy 模型修改；
+2. Alembic 自动迁移；
+3. 旧数据默认值补齐；
+4. 后端接口测试；
+5. 权限越权测试；
+6. 重复文件测试；
+7. 状态流转测试；
+8. 前端表单和列表测试。
+
+验收标准：
+
+- 停用知识库无法上传和创建任务；
+- 无权限用户不能操作文档任务；
+- 同库重复文件不会重复创建；
+- 任务失败能显示明确原因；
+- 重试后任务回到 `queued`；
+- 删除文档后状态为 `deleted`；
+- 修改知识库配置不会影响已创建任务的配置快照。
+
+## 十、暂不实施内容
+
+本计划暂不包括：
+
+- Redis 队列；
+- 旧导入处理器重构；
+- Milvus Schema 修改；
+- `library_id` 写入向量；
+- 查询流程按知识库路由；
+- 实际切片、嵌入和实体识别执行。
+
+这些内容应在后台规则层稳定后再进行，避免导入流程与后台状态定义反复修改。

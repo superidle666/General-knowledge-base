@@ -1,0 +1,91 @@
+/* Shared application and admin layout primitives. Component-only rules live with their Vue component. */
+.eyebrow { font-size: 11px; color: #6b7280; letter-spacing: .04em; text-transform: uppercase; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; background: #dbeafe; color: #1d4ed8; font-size: 13px; font-weight: 700; flex: 0 0 auto; }
+.avatar.small { width: 30px; height: 30px; }
+.avatar.tiny { width: 25px; height: 25px; font-size: 10px; }
+.admin-mark { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 9px; color: #fff; background: #2563eb; font-weight: 700; font-size: 18px; }
+.admin-shell { min-height: 100vh; display: flex; background: #f7f8fa; color: #1f2937; --admin-primary: #2563eb; }
+.admin-shell.is-dark { background: #111827; color: #f3f4f6; --admin-primary: #60a5fa; color-scheme: dark; }
+.admin-shell.is-dark .admin-content,
+.admin-shell.is-dark .panel,
+.admin-shell.is-dark .card,
+.admin-shell.is-dark .table-panel,
+.admin-shell.is-dark .admin-sidebar { background: #1f2937; border-color: #374151; color: #f3f4f6; }
+.admin-shell.is-dark .admin-content { background: #111827; }
+.admin-shell.is-dark .admin-page-head p,
+.admin-shell.is-dark .panel-head p,
+.admin-shell.is-dark .admin-breadcrumb,
+.admin-shell.is-dark .admin-top-account span { color: #9ca3af; }
+.admin-shell.is-dark input,
+.admin-shell.is-dark textarea,
+.admin-shell.is-dark .t-input,
+.admin-shell.is-dark .t-select,
+.admin-shell.is-dark .t-textarea { background: #273449; color: #f3f4f6; border-color: #4b5563; }
+.admin-shell.is-dark .t-table { background: #1f2937; color: #f3f4f6; }
+.admin-shell.is-dark .t-table th { background: #273449; color: #d1d5db; }
+.admin-page-head { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }
+.admin-page-head.compact { margin-bottom: 24px; }
+.admin-page-head h1 { margin: 7px 0 5px; font-size: 25px; letter-spacing: 0; }
+.admin-page-head p { color: #6b7280; font-size: 13px; margin: 0; }
+.admin-page-head .t-button, .admin-content .t-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.admin-page-head .t-button__text, .admin-page-head .t-button__content { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.admin-page-head .t-button__text > svg, .admin-page-head .t-button__content > svg { flex: 0 0 auto; vertical-align: middle; }
+.admin-page-head .t-button .t-icon { flex: 0 0 auto; margin-right: 6px; }
+.admin-page-actions { display: flex; flex-direction: column; align-items: flex-start; gap: 24px; }
+.admin-page-actions .t-checkbox { font-size: 12px; }
+.panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 7px; }
+.panel-head { padding: 18px 20px; border-bottom: 1px solid #e5e7eb; display: flex; align-items: flex-start; justify-content: space-between; }
+.panel-head h2 { margin: 0 0 4px; font-size: 15px; }
+.panel-head p { color: #9ca3af; font-size: 11px; margin: 0; }
+.panel-head .t-button { font-size: 11px; gap: 3px; }
+.panel-icon { color: #9ca3af; width: 17px; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 14px; }
+.toolbar.simple { justify-content: flex-end; }
+.library-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.library-tabs button { border: 0; border-radius: 4px; background: transparent; color: #6b7280; padding: 7px 11px; font-size: 12px; }
+.library-tabs button.active, .library-tabs button:hover { background: #eff6ff; color: #2563eb; }
+.table-search { max-width: 250px; }
+.table-panel { overflow: hidden; }
+.table-panel .t-table { font-size: 12px; }
+.table-panel .t-table th { color: #6b7280; font-size: 11px; }
+.table-panel .t-table th, .table-panel .t-table td { vertical-align: middle; }
+.table-panel .t-table td:last-child, .table-panel .t-table th:last-child { text-align: center; }
+.table-panel .t-table__body td:last-child, .table-panel .t-table__body td:last-child .t-table__cell, .table-panel .t-table__body td:last-child > div { text-align: center; }
+.table-panel .t-table__body td:last-child .t-table__cell, .table-panel .t-table__body td:last-child > div { display: flex; align-items: center; justify-content: center; width: 100%; }
+.table-panel .t-tag { vertical-align: middle; white-space: nowrap; }
+.table-actions { display: grid; width: 100%; min-height: 32px; align-items: center; }
+.table-actions--single { grid-template-columns: max-content; justify-content: center; }
+.table-actions--multiple { grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); justify-content: stretch; }
+.table-actions .t-button { width: 100%; min-width: 0; justify-content: center; white-space: nowrap; }
+.table-actions--single .t-button { width: auto; }
+.edit-action { color: var(--admin-primary, #2563eb) !important; }
+.admin-shell .edit-action:hover { color: #1d4ed8 !important; background: #eff6ff; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.settings-panel { padding: 20px; }
+.settings-panel h2 { font-size: 15px; margin: 0 0 20px; }
+.setting-row, .service-row { min-height: 68px; border-top: 1px solid #f1f5f9; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.setting-row strong, .service-row strong { font-size: 12px; }
+.setting-row p, .service-row p { color: #9ca3af; font-size: 11px; margin: 5px 0 0; }
+.service-row > div { flex: 1; }
+.service-status { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #22c55e; margin-right: 2px; }
+.admin-error { display: flex; align-items: center; gap: 10px; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 5px; padding: 9px 12px; margin-bottom: 16px; font-size: 12px; }
+.admin-error button { margin-left: auto; border: 0; background: transparent; color: #b91c1c; text-decoration: underline; font-size: 11px; }
+.admin-loading { color: #2563eb; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 5px; padding: 9px 12px; margin-bottom: 16px; font-size: 12px; }
+.dialog-fields { display: grid; gap: 12px; }
+.form-field-tip { margin: -4px 0 0; color: var(--td-brand-color, #0052d9); font-size: 13px; line-height: 20px; }
+.dialog-form-error { margin: 0 0 12px; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 5px; padding: 8px 10px; font-size: 12px; line-height: 1.5; }
+.table-panel .t-table__pagination { width: 100%; }
+.table-panel .t-table__pagination .t-pagination { width: 100%; justify-content: flex-end; }
+.table-panel .t-table__pagination .t-pagination__total, .table-panel .t-table__pagination .table-pagination-total { flex: 1 1 auto; margin-right: auto; text-align: left; }
+@media (max-width: 760px) {
+  .admin-page-head { gap: 12px; }
+  .toolbar { align-items: stretch; flex-direction: column; }
+  .toolbar.simple { flex-direction: row; align-items: center; }
+  .table-search { max-width: none; }
+  .table-panel { overflow-x: auto; }
+  .settings-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .admin-page-head { align-items: flex-start; }
+  .admin-page-head > .t-button { flex-shrink: 0; padding-left: 9px; padding-right: 9px; }
+}

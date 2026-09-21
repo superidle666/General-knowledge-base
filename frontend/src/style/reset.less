@@ -1,0 +1,26 @@
+/* 全局元素重置，消除浏览器默认间距并统一盒模型。 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-height: 100%;
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+}
+
+button,
+textarea,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
