@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List
 
 from sqlalchemy import delete
 
-from backend.app.db.models import Document, DocumentChunk, ImportTask
+from backend.app.db.models import Document, DocumentChunk, Entity, ImportTask
 from backend.app.db.session import SessionLocal
 from config.milvus_config import milvus_config
 from processor.import_processor.base import BaseNode
@@ -42,10 +43,11 @@ class NodePersistChunks(BaseNode):
     def process(self, state: ImportGraphState) -> ImportGraphState:
         """Persist chunks in MySQL and compensate Milvus if the database transaction fails."""
         task_id, library_id, document_id, chunks = self._validate_state(state)
+        entity_row = self._build_entity_row(state, library_id, document_id)
         try:
             self._run_database_coroutine(
                 state,
-                lambda: self._persist_chunks(task_id, library_id, document_id, chunks),
+                lambda: self._persist_chunks(task_id, library_id, document_id, chunks, entity_row),
             )
         except Exception as error:
             compensation_error = self._compensate_milvus(chunks)
@@ -137,6 +139,7 @@ class NodePersistChunks(BaseNode):
         library_id: int,
         document_id: int,
         chunks: List[Dict[str, Any]],
+        entity_row: Entity | None,
     ) -> None:
         """Replace a document's Chunk rows and update the import task in one MySQL transaction."""
         async with self._session_factory() as session:
@@ -158,6 +161,11 @@ class NodePersistChunks(BaseNode):
                 )
                 for fallback_index, chunk in enumerate(chunks):
                     session.add(self._build_document_chunk(document_id, chunk, fallback_index))
+
+                # 重导入以“先删后写”重置本档实体，与切片处于同一事务，避免脏残留。
+                await session.execute(delete(Entity).where(Entity.document_id == document_id))
+                if entity_row is not None:
+                    session.add(entity_row)
 
                 import_task.chunk_count = len(chunks)
                 import_task.status = "completed"
@@ -206,6 +214,38 @@ class NodePersistChunks(BaseNode):
                 "content_block_orders": list(chunk.get("content_block_orders", [])),
                 "image_metadata": list(chunk.get("image_metadata", [])),
             },
+        )
+
+    @staticmethod
+    def _normalize_entity_name(name: str) -> str:
+        """生成用于精确对齐的归一化实体名：去首尾空白、casefold、剔除内部空白。"""
+        return re.sub(r"\s+", "", name.strip()).casefold()
+
+    @classmethod
+    def _build_entity_row(
+        cls,
+        state: Dict[str, Any],
+        library_id: int,
+        document_id: int,
+    ) -> Entity | None:
+        """仅在强制识别成功时构造一行主实体；其余模式与 uncertain/none 不落库。"""
+        if state.get("entity_recognition_mode") != "required":
+            return None
+        if state.get("entity_status") != "ok":
+            return None
+        name = str(state.get("item_name") or "").strip()
+        if not name:
+            return None
+        candidates = [str(item).strip() for item in (state.get("entity_candidates") or []) if str(item).strip()]
+        aliases = [item for item in dict.fromkeys(candidates) if item != name]
+        return Entity(
+            library_id=library_id,
+            document_id=document_id,
+            name=name,
+            normalized_name=cls._normalize_entity_name(name),
+            aliases=aliases,
+            source=str(state.get("entity_source") or "llm"),
+            maybe_series=bool(state.get("entity_maybe_series")),
         )
 
     def _compensate_milvus(self, chunks: List[Dict[str, Any]]) -> Exception | None:

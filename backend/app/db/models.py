@@ -151,6 +151,7 @@ class Library(TimestampMixin, SoftDeleteMixin, Base):
     documents: Mapped[list["Document"]] = relationship(back_populates="library")
     members: Mapped[list["LibraryMember"]] = relationship(back_populates="library")
     import_tasks: Mapped[list["ImportTask"]] = relationship(back_populates="library")
+    entities: Mapped[list["Entity"]] = relationship(back_populates="library")
 
 
 class LibraryMember(Base):
@@ -180,7 +181,7 @@ class Document(TimestampMixin, SoftDeleteMixin, Base):
     file_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     file_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
-    # uploaded、processing、ready、failed、deleted 驱动文档生命周期。
+    # uploaded、processing、needs_review、ready、failed、deleted 驱动文档生命周期。
     status: Mapped[str] = mapped_column(String(20), default="uploaded", server_default="uploaded", nullable=False)
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True)
@@ -189,6 +190,7 @@ class Document(TimestampMixin, SoftDeleteMixin, Base):
     library: Mapped[Library] = relationship(back_populates="documents")
     chunks: Mapped[list["DocumentChunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     import_tasks: Mapped[list["ImportTask"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    entities: Mapped[list["Entity"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
 
 class DocumentChunk(Base):
@@ -232,6 +234,35 @@ class ImportTask(TimestampMixin, Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     library: Mapped[Library] = relationship(back_populates="import_tasks")
     document: Mapped[Document] = relationship(back_populates="import_tasks")
+
+
+class Entity(Base):
+    """知识库实体词表；首期一篇文档一条主实体记录，供检索对齐、候选列举与人工校正。"""
+    __tablename__ = "kb_entity"
+    __table_args__ = (
+        UniqueConstraint("document_id", name="uq_kb_entity_document"),
+        Index("ix_kb_entity_library_name", "library_id", "normalized_name"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    # 库级隔离：检索对齐只在同一知识库的实体集内进行。
+    library_id: Mapped[int] = mapped_column(ForeignKey("kb_library.id", ondelete="CASCADE"), nullable=False)
+    # 首期一篇文档一个主实体，故对 document_id 加唯一约束；多实体升级后放开（见落地方案 §11）。
+    document_id: Mapped[int] = mapped_column(ForeignKey("kb_document.id", ondelete="CASCADE"), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # 归一化名（去空格/统一大小写与全半角），用于确定性精确匹配对齐。
+    normalized_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    aliases: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    # llm 表示模型抽取，manual 表示人工确认或补填。
+    source: Mapped[str] = mapped_column(String(20), default="llm", server_default="llm", nullable=False)
+    # 多候选线索标记：主实体仍只有一条，该标记供后续多实体升级与人工复核定位。
+    maybe_series: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    library: Mapped[Library] = relationship(back_populates="entities")
+    document: Mapped[Document] = relationship(back_populates="entities")
+
 
 class Tag(TimestampMixin, Base):
     """可复用的文档标签模型。"""

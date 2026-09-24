@@ -41,7 +41,6 @@ _NODE_NAME_TO_CN: Dict[str, str] = {
     "node_md_img": "Markdown图片处理",
     "node_document_split": "文档切分",
     "node_entity_recognition_disabled": "跳过实体识别",
-    "node_entity_recognition_optional": "实体识别(可选)",
     "node_entity_recognition_required": "实体识别(强制)",
     "node_bge_embedding": "向量生成",
     "node_import_milvus": "导入向量库",

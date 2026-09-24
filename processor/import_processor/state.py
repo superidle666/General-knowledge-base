@@ -6,7 +6,7 @@ from typing import Any, Literal, TypedDict
 
 from processor.import_processor.content_blocks import ContentBlock
 
-EntityRecognitionMode = Literal["disabled", "optional", "required"]
+EntityRecognitionMode = Literal["disabled", "required"]
 
 
 class ImportGraphState(TypedDict, total=False):
@@ -31,6 +31,12 @@ class ImportGraphState(TypedDict, total=False):
     item_name: str
     item_names: list[str]
     entity_recognition_mode: EntityRecognitionMode
+    # 强制枚举结果元信息：status 为 ok/uncertain/none，供落库与人工兜底判定。
+    entity_status: str
+    entity_candidates: list[str]
+    entity_maybe_series: bool
+    # 主实体来源：llm 为模型枚举，manual 为人工确认（确认后跳过模型直接复用）。
+    entity_source: str
     config_snapshot: dict[str, Any]
 
     md_content: str
@@ -62,6 +68,10 @@ GRAPH_DEFAULT_STATE: ImportGraphState = {
     "item_name": "",
     "item_names": [],
     "entity_recognition_mode": "disabled",
+    "entity_status": "",
+    "entity_candidates": [],
+    "entity_maybe_series": False,
+    "entity_source": "llm",
     "config_snapshot": {},
     "md_content": "",
     "ocr_content": "",

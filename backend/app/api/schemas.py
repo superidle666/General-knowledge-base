@@ -177,7 +177,7 @@ class LibraryCreate(BaseModel):
     cover_color: str | None = Field(default=None, max_length=20)
 
 
-    entity_recognition_mode: str = Field(default="disabled", pattern="^(disabled|optional|required)$")
+    entity_recognition_mode: str = Field(default="disabled", pattern="^(disabled|required)$")
     allowed_file_types: list[str] | None = None
     max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
     max_document_count: int | None = Field(default=None, ge=1)
@@ -199,7 +199,7 @@ class LibraryUpdate(BaseModel):
     status: str | None = Field(default=None, pattern="^(active|disabled)$")
 
 
-    entity_recognition_mode: str | None = Field(default=None, pattern="^(disabled|optional|required)$")
+    entity_recognition_mode: str | None = Field(default=None, pattern="^(disabled|required)$")
     allowed_file_types: list[str] | None = None
     max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
     max_document_count: int | None = Field(default=None, ge=1)
@@ -441,6 +441,19 @@ class ImportTaskOut(BaseModel):
     finished_at: datetime | None
     document_title: str | None = None
     library_name: str | None = None
+
+
+class ImportTaskEntityConfirm(BaseModel):
+    """待确认导入任务的主实体确认请求；no_entity=True 表示确认无实体并终止导入。"""
+    item_name: str | None = Field(default=None, max_length=255)
+    no_entity: bool = False
+
+    @field_validator("item_name")
+    @classmethod
+    def normalize_item_name(cls, value: str | None) -> str | None:
+        return value.strip() if value and value.strip() else None
+
+
 class ChunkCreate(BaseModel):
     """创建文档分段请求模型；vector_id 用于关联向量数据库记录。"""
     chunk_index: int = Field(ge=0)

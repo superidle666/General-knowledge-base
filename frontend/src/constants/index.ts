@@ -23,6 +23,7 @@ export const PAGINATION = {
 export const DOCUMENT_STATUS = {
   UPLOADED: 'uploaded',
   PROCESSING: 'processing',
+  NEEDS_REVIEW: 'needs_review',
   READY: 'ready',
   FAILED: 'failed',
   DELETED: 'deleted',
@@ -32,6 +33,7 @@ export const DOCUMENT_STATUS = {
 export const TASK_STATUS = {
   PENDING: 'pending',
   PROCESSING: 'processing',
+  NEEDS_REVIEW: 'needs_review',
   COMPLETED: 'completed',
   FAILED: 'failed',
 } as const

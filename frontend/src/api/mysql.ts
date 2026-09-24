@@ -26,7 +26,7 @@ export type Library = {
   created_at: string
   updated_at: string
   deleted_at: string | null
-  entity_recognition_mode: "disabled" | "optional" | "required"
+  entity_recognition_mode: "disabled" | "required"
   allowed_file_types: string[] | null
   max_file_size_mb: number | null
   max_document_count: number | null
@@ -271,6 +271,12 @@ export const mysqlApi = {
   getImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id),
   retryImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/retry', { method: 'POST' }),
   cancelImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/cancel', { method: 'POST' }),
+  confirmImportTaskEntity: (id: number, payload: { item_name?: string | null; no_entity?: boolean }) => {
+    return requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/confirm-entity', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+  },
   deleteImportTask: (id: number) => requestApi<void>('/api/v1/import-tasks/' + id, { method: 'DELETE' }),
   listDocuments: (params = '') => {
     const query = params ? `?${params}` : ''

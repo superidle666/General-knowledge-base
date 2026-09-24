@@ -102,10 +102,11 @@ class ImportWorker:
             await acknowledge_import_task(task_id, redis_client=self.redis_client)
             return
         heartbeat = asyncio.create_task(self._lease_heartbeat(task_id))
+        final_state: dict[str, Any] | None = None
         try:
             loop = asyncio.get_running_loop()
             state["database_event_loop"] = loop
-            await asyncio.to_thread(self._run_graph_with_progress, state, task_id, loop)
+            final_state = await asyncio.to_thread(self._run_graph_with_progress, state, task_id, loop)
         except ImportTaskCancelled:
             await self._mark_cancelled(task_id)
             await acknowledge_import_task(task_id, redis_client=self.redis_client)
@@ -114,7 +115,11 @@ class ImportWorker:
             await self._retry_or_fail(task_id, attempt, error)
         else:
             await acknowledge_import_task(task_id, redis_client=self.redis_client)
-            self.logger.info("导入任务完成：任务=%s", task_id)
+            if self._is_needs_review(final_state):
+                await self._mark_needs_review(task_id, final_state or {})
+                self.logger.info("导入任务转入人工确认实体：任务=%s", task_id)
+            else:
+                self.logger.info("导入任务完成：任务=%s", task_id)
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
@@ -126,11 +131,16 @@ class ImportWorker:
             await asyncio.sleep(interval)
             await refresh_import_lease(task_id, redis_client=self.redis_client)
 
-    def _run_graph_with_progress(self, state: ImportGraphState, task_id: int, loop: asyncio.AbstractEventLoop) -> None:
+    def _run_graph_with_progress(self, state: ImportGraphState, task_id: int, loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
         """Run the synchronous graph stream and synchronously wait for progress callbacks."""
         workflow = self.workflow_factory()
+        final_state: dict[str, Any] = dict(state)
         for event in workflow.run(state, stream=True):
             node_name = next(iter(event), "unknown") if isinstance(event, dict) else "unknown"
+            if isinstance(event, dict) and event:
+                node_output = next(iter(event.values()))
+                if isinstance(node_output, dict):
+                    final_state = node_output
             progress = self._progress_for_node(node_name)
             callback = asyncio.run_coroutine_threadsafe(
                 self._record_progress_and_check_cancel(task_id, node_name, progress),
@@ -142,6 +152,14 @@ class ImportWorker:
                 raise
             except Exception as error:
                 raise RuntimeError(f"Worker 进度更新失败：{error}") from error
+        return final_state
+
+    @staticmethod
+    def _is_needs_review(final_state: dict[str, Any] | None) -> bool:
+        """强制模式下图在实体步提前结束且未定主实体，即为待人工确认。"""
+        if not isinstance(final_state, dict):
+            return False
+        return final_state.get("entity_recognition_mode") == "required" and final_state.get("entity_status") in {"uncertain", "none"}
 
     async def _record_progress_and_check_cancel(self, task_id: int, node_name: str, progress: int) -> None:
         """Persist the current node and stop before the next node if cancellation was requested."""
@@ -164,7 +182,6 @@ class ImportWorker:
             "node_md_img": 35,
             "node_document_split": 50,
             "node_entity_recognition_disabled": 60,
-            "node_entity_recognition_optional": 60,
             "node_entity_recognition_required": 60,
             "node_bge_embedding": 80,
             "node_import_milvus": 92,
@@ -265,7 +282,7 @@ class ImportWorker:
     def _build_state(task: ImportTask, document: Document, library: Library) -> ImportGraphState:
         """Convert MySQL task records into the state expected by ``KBImportWorkflow``."""
         import_file_path = ImportWorker._resolve_project_path(document.storage_key)
-        return {
+        state: ImportGraphState = {
             "task_id": str(task.id),
             "import_task_id": task.id,
             "knowledge_base_id": library.id,
@@ -278,6 +295,16 @@ class ImportWorker:
             "file_dir": str(ImportWorker._resolve_project_path("storage/processed")),
             "file_title": document.title,
         }
+        # 人工确认后重跑：把已确认主实体预置进 state，强制识别节点据此跳过模型。
+        entity_result = task.entity_result or {}
+        manual_name = str(entity_result.get("manual_name") or "").strip()
+        if entity_result.get("confirmed") and manual_name:
+            state["item_name"] = manual_name
+            state["entity_status"] = "ok"
+            state["entity_source"] = "manual"
+            state["entity_candidates"] = list(entity_result.get("candidates") or [manual_name])
+            state["entity_maybe_series"] = bool(entity_result.get("maybe_series"))
+        return state
 
     @staticmethod
     def _resolve_project_path(value: str) -> Path:
@@ -312,6 +339,33 @@ class ImportWorker:
                 if document is not None:
                     document.status = "failed"
                     document.parse_error = str(error)[:65535]
+
+    async def _mark_needs_review(self, task_id: int, final_state: dict[str, Any]) -> None:
+        """强制识别未确定主实体时，把任务停在待确认态并保留候选供人工确认。
+
+        采用方案 (i)：不做向量化/入库，仅落任务态与候选；确认后重新入队跑整条导入。
+        """
+        entity_result = {
+            "status": str(final_state.get("entity_status") or "uncertain"),
+            "guess": str(final_state.get("item_name") or ""),
+            "candidates": [str(name) for name in (final_state.get("entity_candidates") or []) if str(name).strip()],
+            "maybe_series": bool(final_state.get("entity_maybe_series")),
+            "confirmed": False,
+        }
+        async with self.session_factory() as session:
+            async with session.begin():
+                task = await session.get(ImportTask, task_id)
+                if task is None or task.status != "processing":
+                    return
+                task.status = "needs_review"
+                task.current_step = "entity_review"
+                task.progress = 60
+                task.error_message = "强制实体识别未确定主实体，等待人工确认"
+                task.entity_result = entity_result
+                task.finished_at = None
+                document = await session.get(Document, task.document_id)
+                if document is not None:
+                    document.status = "needs_review"
 
     async def _mark_cancelled(self, task_id: int) -> None:
         """Mark a queued task and its document as cancelled before graph execution."""

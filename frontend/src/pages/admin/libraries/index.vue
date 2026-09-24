@@ -19,7 +19,6 @@ type LibraryVisibility = Library['visibility']
 
 const allEntityModeOptions = [
   { label: '不启用实体识别', value: 'disabled' },
-  { label: '可选实体识别', value: 'optional' },
   { label: '强制实体识别', value: 'required' },
 ]
 const isSystemAdmin = computed(() => userStore.userInfo?.roles.includes('admin') ?? false)

@@ -25,7 +25,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.api.schemas import (
     ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentTagsUpdate,
     DocumentUpdate, DocumentUploadOut, LibraryCreate, LibraryOut, LibraryUpdate,
-    ImportTaskOut, MemberCreate, MemberOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
+    ImportTaskOut, ImportTaskEntityConfirm, MemberCreate, MemberOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
     RoleCreate, RoleOut, RoleUpdate, TagCreate, TagOut, TagUpdate, UserCreate,
     UserOut, UserUpdate,
 )
@@ -112,7 +112,7 @@ async def commit(session: AsyncSession, duplicate_message: str) -> None:
 log = log_operation
 
 ALLOWED_DOCUMENT_EXTENSIONS = frozenset({".pdf", ".md"})
-IMPORT_TASK_STATUSES = frozenset({"queued", "processing", "completed", "failed", "cancelled"})
+IMPORT_TASK_STATUSES = frozenset({"queued", "processing", "needs_review", "completed", "failed", "cancelled"})
 
 def validate_library_rules(payload: dict) -> None:
     """校验知识库导入与切分规则，确保保存的配置不超出当前处理器支持范围。
@@ -926,6 +926,59 @@ async def retry_import_task(task_id: int, session: AsyncSession = Depends(get_db
     await commit(session, "重试导入任务失败")
     await enqueue_import_task(task.id)
     return import_task_out(task)
+
+@router.post("/import-tasks/{task_id}/confirm-entity", response_model=ImportTaskOut)
+async def confirm_import_task_entity(
+    task_id: int, payload: ImportTaskEntityConfirm, session: AsyncSession = Depends(get_db),
+):
+    """确认或补填待确认任务的主实体后重新入队；确认无实体则终止导入。
+
+    方案 (i)：确认时不直接写库/向量，而是预置已确认实体后重跑整条导入，
+    由强制识别节点跳过模型、以 source=manual 落 kb_entity。
+    """
+    task = await session.scalar(
+        select(ImportTask)
+        .options(selectinload(ImportTask.document), selectinload(ImportTask.library))
+        .where(ImportTask.id == task_id)
+    )
+    if task is None:
+        raise HTTPException(404, "导入任务不存在")
+    if task.status != "needs_review":
+        raise HTTPException(400, "只有待确认实体的任务可以执行该操作")
+    prior = task.entity_result or {}
+    if payload.no_entity:
+        message = "确认该文档无明确主实体；要求实体的知识库无法导入无实体文档，请改用禁用实体识别的知识库。"
+        task.status = "failed"
+        task.current_step = "entity_review"
+        task.progress = 60
+        task.error_message = message
+        task.entity_result = {**prior, "confirmed": False, "no_entity": True}
+        task.document.status = "failed"
+        task.document.parse_error = message
+        await log(session, "confirm_no_entity", "import_task", task.id, {"document_id": task.document_id})
+        await commit(session, "确认无实体失败")
+        return import_task_out(task)
+    if not payload.item_name:
+        raise HTTPException(400, "请填写或选择主实体，或确认无实体")
+    task.entity_result = {
+        **prior,
+        "confirmed": True,
+        "no_entity": False,
+        "manual_name": payload.item_name,
+        "candidates": list(prior.get("candidates") or [payload.item_name]),
+    }
+    task.status = "queued"
+    task.current_step = "queued"
+    task.progress = 0
+    task.error_message = None
+    task.started_at = None
+    task.finished_at = None
+    task.document.status = "uploaded"
+    await log(session, "confirm_entity", "import_task", task.id, {"document_id": task.document_id, "item_name": payload.item_name})
+    await commit(session, "确认主实体失败")
+    await enqueue_import_task(task.id)
+    return import_task_out(task)
+
 
 @router.post("/import-tasks/{task_id}/cancel", response_model=ImportTaskOut)
 async def cancel_import_task(task_id: int, session: AsyncSession = Depends(get_db)):

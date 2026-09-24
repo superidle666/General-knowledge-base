@@ -25,7 +25,8 @@ DOCUMENT_OWNERS = {"document"}
 # 任务进入后不再被 Worker 重新领取的状态。
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
 # 文档生命周期，需与 models.py 中 kb_document.status 的注释保持一致。
-DOCUMENT_STATUS_VOCABULARY = {"uploaded", "processing", "ready", "failed", "deleted"}
+# needs_review 为强制实体识别未定主实体时的待人工确认态（方案 i：此时尚未向量化入库）。
+DOCUMENT_STATUS_VOCABULARY = {"uploaded", "processing", "needs_review", "ready", "failed", "deleted"}
 
 STATUS_SOURCES = [API_MYSQL, IMPORT_WORKER, PERSIST_CHUNKS]
 

@@ -10,7 +10,6 @@ from processor.import_processor.import_config import ImportConfig, get_config
 from processor.import_processor.nodes.node_bge_embedding import NodeBGEEmbedding
 from processor.import_processor.nodes.node_document_split import NodeDocumentSplit
 from processor.import_processor.nodes.node_entity_recognition_disabled import NodeEntityRecognitionDisabled
-from processor.import_processor.nodes.node_entity_recognition_optional import NodeEntityRecognitionOptional
 from processor.import_processor.nodes.node_entity_recognition_required import NodeEntityRecognitionRequired
 from processor.import_processor.nodes.node_entry import NodeEntry
 from processor.import_processor.nodes.node_import_milvus import NodeImportMilvus
@@ -22,7 +21,6 @@ from processor.import_processor.state import ImportGraphState, get_default_state
 
 ENTITY_RECOGNITION_NODE_NAMES: dict[str, str] = {
     "disabled": "node_entity_recognition_disabled",
-    "optional": "node_entity_recognition_optional",
     "required": "node_entity_recognition_required",
 }
 
@@ -62,8 +60,15 @@ class KBImportWorkflow:
             )
         return ENTITY_RECOGNITION_NODE_NAMES[mode]
 
+    @staticmethod
+    def route_after_entity_required(state: ImportGraphState) -> str:
+        """主实体确定则继续向量化；uncertain/none 直接结束，由 Worker 转 needs_review。"""
+        if state.get("entity_status") == "ok":
+            return "node_bge_embedding"
+        return END
+
     def build_graph(self):
-        """创建并编译新版三模式导入图。"""
+        """创建并编译新版二模式（disabled/required）导入图。"""
         graph = StateGraph(ImportGraphState)
 
         graph.add_node("node_entry", NodeEntry(config=self.config))
@@ -71,7 +76,6 @@ class KBImportWorkflow:
         graph.add_node("node_md_img", NodeMDImg(config=self.config))
         graph.add_node("node_document_split", NodeDocumentSplit(config=self.config))
         graph.add_node("node_entity_recognition_disabled", NodeEntityRecognitionDisabled(config=self.config))
-        graph.add_node("node_entity_recognition_optional", NodeEntityRecognitionOptional(config=self.config))
         graph.add_node("node_entity_recognition_required", NodeEntityRecognitionRequired(config=self.config))
         graph.add_node("node_bge_embedding", NodeBGEEmbedding(config=self.config))
         graph.add_node("node_import_milvus", NodeImportMilvus(config=self.config))
@@ -95,13 +99,15 @@ class KBImportWorkflow:
             self.route_after_document_split,
             {
                 "node_entity_recognition_disabled": "node_entity_recognition_disabled",
-                "node_entity_recognition_optional": "node_entity_recognition_optional",
                 "node_entity_recognition_required": "node_entity_recognition_required",
             },
         )
         graph.add_edge("node_entity_recognition_disabled", "node_bge_embedding")
-        graph.add_edge("node_entity_recognition_optional", "node_bge_embedding")
-        graph.add_edge("node_entity_recognition_required", "node_bge_embedding")
+        graph.add_conditional_edges(
+            "node_entity_recognition_required",
+            self.route_after_entity_required,
+            {"node_bge_embedding": "node_bge_embedding", END: END},
+        )
         graph.add_edge("node_bge_embedding", "node_import_milvus")
         graph.add_edge("node_import_milvus", "node_persist_chunks")
         graph.add_edge("node_persist_chunks", END)

@@ -10,7 +10,6 @@ type LibraryVisibility = Library['visibility']
 
 const allEntityModeOptions = [
   { label: '不启用实体识别', value: 'disabled' },
-  { label: '可选实体识别', value: 'optional' },
   { label: '强制实体识别', value: 'required' },
 ] as const
 const fileTypeOptions = [
@@ -23,7 +22,6 @@ const visibilityOptions = [
 ] as const
 const entityModeLabels: Record<EntityRecognitionMode, string> = {
   disabled: '不启用实体识别',
-  optional: '可选实体识别',
   required: '强制实体识别',
 }
 

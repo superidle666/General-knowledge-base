@@ -28,6 +28,7 @@ export type UserRow = User & {
 export const documentStatusLabels: Record<string, string> = {
   ready: '可检索',
   processing: '处理中',
+  needs_review: '待确认实体',
   failed: '失败',
   deleted: '已删除',
   uploaded: '待处理',

@@ -111,6 +111,7 @@ function getDocumentTheme(row: DocumentRow) {
   if (row.status === DOCUMENT_STATUS.READY) return 'success'
   if (row.status === DOCUMENT_STATUS.FAILED) return 'danger'
   if (row.status === DOCUMENT_STATUS.DELETED) return 'default'
+  if (row.status === DOCUMENT_STATUS.NEEDS_REVIEW) return 'primary'
   return 'warning'
 }
 async function loadDocuments() {
