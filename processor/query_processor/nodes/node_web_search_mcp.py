@@ -16,6 +16,11 @@ from processor.query_processor.state import QueryGraphState
 from tool.logger import logger
 from utils.json_format_utils import serialize_json
 
+# 单次联网搜索的总预算：SDK 自带 timeout 只管单个请求，不带总超时会导致“重试3次 x 10s”拖住整个回答
+MCP_TOTAL_TIMEOUT_SECONDS = 20
+# 搜索条数上限：百炼侧单次可用量有限，拿太多只会拉高延迟和成本
+MCP_MAX_RESULT_COUNT = 10
+
 
 class NodeWebSearchMcp(NodeBase):
     """
@@ -26,33 +31,64 @@ class NodeWebSearchMcp(NodeBase):
     name: str = "node_web_search_mcp"
 
     def process(self, state: QueryGraphState) -> QueryGraphState:
+        """联网检索，失败一律降级为“无外部结果”，不能拖垮整个问答请求。
 
-        query = state.get("rewritten_query", "")
-        docs = []
-        # 如果没有查询内容，直接返回
-        if query:
-            result = asyncio.run(self._mcp_call(query))
-            if result:
-                pages = json.loads(result.content[0].text).get("pages") or []
-                # 统一输出结构化结果，供后续 rerank/引用使用
-                # 每条：{title, url, snippet}
+        返回前统一成 {title, url, snippet, site_name} 结构，由 rerank 节点归入多源文档；
+        web_search_failed 会随结果一并置位，便于前端和日志区分“没搜到”和“搜失败”。
+        """
+        query = str(state.get("rewritten_query") or state.get("original_query") or "").strip()
+        if not query:
+            logger.info("联网检索跳过：无有效问题")
+            return {"web_search_docs": [], "web_search_failed": False}
 
-                for item in pages:
-                    snippet = (item.get("snippet") or "").strip()
-                    url = (item.get("url") or "").strip()
-                    title = (item.get("title") or "").strip()
-                    if not snippet:
-                        continue
-                    docs.append({"title": title, "url": url, "snippet": snippet})
+        try:
+            result = asyncio.run(asyncio.wait_for(
+                self._mcp_call(query, count=self._resolve_count(state)),
+                timeout=MCP_TOTAL_TIMEOUT_SECONDS,
+            ))
+            docs = self._parse_pages(result)
+        except Exception as e:
+            logger.error(f"联网检索失败，降级为仅用本地知识库结果继续回答: {e}")
+            return {"web_search_docs": [], "web_search_failed": True}
 
-                logger.info(f"MCP 搜索结果:{docs}")
+        logger.info("联网检索补充 %s 条结果", len(docs))
+        return {"web_search_docs": docs, "web_search_failed": False}
 
-        if docs:
-            return {"web_search_docs": docs}
-        return {}
+    @staticmethod
+    def _resolve_count(state: QueryGraphState) -> int:
+        """搜索条数跟着 top_k 走并留出重排余量，避免与用户可配的来源数量两套口径。"""
+        top_k = int(state.get("top_k") or 5)
+        return max(min(top_k * 2, MCP_MAX_RESULT_COUNT), 1)
 
+    @staticmethod
+    def _parse_pages(result) -> list[dict]:
+        """把 MCP 返回的文本段解析成统一结构；字段缺失只跳过该条，不让整次搜索失败。"""
+        content = getattr(result, "content", None) or []
+        if not content:
+            return []
+        text = getattr(content[0], "text", None)
+        if not text:
+            return []
+        payload = json.loads(text)
+        pages = payload.get("pages") if isinstance(payload, dict) else None
+        docs: list[dict] = []
+        for item in pages or []:
+            if not isinstance(item, dict):
+                continue
+            snippet = str(item.get("snippet") or "").strip()
+            if not snippet:
+                continue
+            docs.append({
+                "title": str(item.get("title") or "").strip(),
+                "url": str(item.get("url") or "").strip(),
+                "snippet": snippet,
+                # 站点名比页面标题更适合做来源展示（页面标题常带一堆 SEO 后缀）
+                "site_name": str(item.get("hostname") or "").strip(),
+            })
+        return docs
 
-    async def _mcp_call(self, query):
+    async def _mcp_call(self, query: str, count: int = 5):
+        """每次请求新建并回收一条 MCP 连接：避开跨事件循环复用连接的复杂度，代价是多一次握手。"""
 
         search_mcp = MCPServerStreamableHttp(
             name="search_mcp",
@@ -67,13 +103,16 @@ class NodeWebSearchMcp(NodeBase):
 
         try:
             await search_mcp.connect()
-            result = await search_mcp.call_tool(
+            return await search_mcp.call_tool(
                 tool_name="bailian_web_search",
-                arguments={"query": query, "count": 5},
+                arguments={"query": query, "count": count},
             )
-            return result
         finally:
-            await search_mcp.cleanup()
+            try:
+                await search_mcp.cleanup()
+            except Exception as e:
+                # 断连失败不能掩盖真正的搜索异常（否则排障时看到的是无关错误）
+                logger.warning(f"关闭 MCP 连接失败: {e}")
 
 
 if __name__ == "__main__":

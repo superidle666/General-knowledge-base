@@ -50,7 +50,7 @@ const createForm = ref({
   entityMode: 'disabled' as EntityRecognitionMode, allowedFileTypes: ['pdf', 'md'],
   maxFileSizeMb: undefined as number | undefined, maxDocumentCount: undefined as number | undefined,
   maxUploadFileCount: undefined as number | undefined, chunkSize: undefined as number | undefined,
-  chunkOverlap: undefined as number | undefined, visibility: 'private' as LibraryVisibility,
+  chunkOverlap: undefined as number | undefined, useHyde: false, visibility: 'private' as LibraryVisibility,
 })
 const editForm = ref(emptyForm())
 
@@ -65,7 +65,7 @@ const activeLibraries = computed(() => visibleLibraries.value.filter((library) =
 const totalDocuments = computed(() => activeLibraries.value.reduce((total, library) => total + library.document_count, 0))
 
 function emptyForm() {
-  return { name: '', code: '', description: '', entityMode: 'disabled' as EntityRecognitionMode, allowedFileTypes: ['pdf', 'md'], maxFileSizeMb: undefined as number | undefined, maxDocumentCount: undefined as number | undefined, maxUploadFileCount: undefined as number | undefined, chunkSize: undefined as number | undefined, chunkOverlap: undefined as number | undefined, visibility: 'private' as LibraryVisibility }
+  return { name: '', code: '', description: '', entityMode: 'disabled' as EntityRecognitionMode, allowedFileTypes: ['pdf', 'md'], maxFileSizeMb: undefined as number | undefined, maxDocumentCount: undefined as number | undefined, maxUploadFileCount: undefined as number | undefined, chunkSize: undefined as number | undefined, chunkOverlap: undefined as number | undefined, useHyde: false, visibility: 'private' as LibraryVisibility }
 }
 
 function selectLibrary(library: Library) {
@@ -112,6 +112,7 @@ function toForm(library: Library) {
     maxUploadFileCount: library.max_upload_file_count || undefined,
     chunkSize: typeof chunkSize === 'number' ? chunkSize : undefined,
     chunkOverlap: typeof chunkOverlap === 'number' ? chunkOverlap : undefined,
+    useHyde: Boolean(library.use_hyde),
     visibility: library.visibility,
   }
 }
@@ -133,6 +134,7 @@ function toPayload(form: typeof createForm.value) {
     max_file_size_mb: form.maxFileSizeMb || null, max_document_count: form.maxDocumentCount || null,
     max_upload_file_count: form.maxUploadFileCount || null,
     chunking_config: form.chunkSize ? { chunk_size: form.chunkSize, chunk_overlap: form.chunkOverlap || 0 } : null,
+    use_hyde: form.useHyde,
     visibility: form.visibility,
   }
 }
@@ -251,6 +253,7 @@ onMounted(() => void loadLibraries())
         <div class="library-field"><t-input-number class="library-rule-number" v-model="createForm.maxUploadFileCount" label="单次上传文件上限" :min="1" clearable /></div>
         <div class="library-field"><t-input-number class="library-rule-number" v-model="createForm.chunkSize" label="切片长度（字符）" :min="1" clearable /></div>
         <div class="library-field"><t-input-number class="library-rule-number" v-model="createForm.chunkOverlap" label="切片重叠（字符）" :min="0" clearable /></div>
+        <div class="library-field library-field-switch"><span class="library-switch-label">HyDE 扩展召回</span><t-switch v-model="createForm.useHyde" :label="['已开启', '已关闭']" /><small class="library-switch-hint">先让大模型生成假设性答案再检索，可提升召回；每条问题多一次大模型调用、回答更慢，默认关闭。</small></div>
         <div class="library-field"><t-textarea v-model="createForm.description" label="描述" placeholder="请输入知识库用途、资料范围和使用场景（可选）" /></div>
       </div>
       <div class="library-actions"><t-button variant="outline" @click="showCreateDialog = false">取消</t-button><t-button theme="primary" :loading="creating" @click="createLibrary">创建知识库</t-button></div>
@@ -281,6 +284,7 @@ onMounted(() => void loadLibraries())
           <div class="library-field"><t-input-number class="library-rule-number" v-model="editForm.maxUploadFileCount" label="单次上传文件上限" :min="1" clearable /></div>
           <div class="library-field"><t-input-number class="library-rule-number" v-model="editForm.chunkSize" label="切片长度（字符）" :min="1" clearable /></div>
           <div class="library-field"><t-input-number class="library-rule-number" v-model="editForm.chunkOverlap" label="切片重叠（字符）" :min="0" clearable /></div>
+          <div class="library-field library-field-switch"><span class="library-switch-label">HyDE 扩展召回</span><t-switch v-model="editForm.useHyde" :label="['已开启', '已关闭']" /><small class="library-switch-hint">开启后该知识库的每次问答都会多一次大模型调用，回答更慢、用量更高；用户端不再提供该开关。</small></div>
           <div class="library-field"><t-textarea v-model="editForm.description" label="描述" placeholder="请输入知识库用途、资料范围和使用场景（可选）" /></div>
         </div>
         <div class="library-actions"><t-button theme="primary" :loading="saving" @click="saveLibrary">保存当前规则</t-button><t-button variant="outline" :loading="changingStatus" @click="toggleLibraryStatus">{{ selectedLibrary.status === 'active' ? '停用知识库' : '启用知识库' }}</t-button><t-tooltip content="请先删除该知识库文档后再删除知识库" :disabled="selectedLibrary.document_count === 0"><span><t-button theme="danger" variant="outline" :disabled="selectedLibrary.document_count > 0" :loading="deleting" @click="deleteSelectedLibrary">删除知识库</t-button></span></t-tooltip></div>
@@ -323,6 +327,9 @@ onMounted(() => void loadLibraries())
 .library-detail-heading h2 { margin: 5px 0 4px; color: #1f2937; font-size: 18px; }
 .library-detail-heading p { margin: 0; color: #64748b; font-size: 11px; }
 .library-rule-number { width: 100%; padding: 0 28px; }
+.library-field-switch { display: grid; gap: 6px; align-content: start; }
+.library-switch-label { color: rgb(0 10 31 / 85%); font-size: 14px; line-height: 22px; }
+.library-switch-hint { color: #64748b; font-size: 11px; line-height: 1.5; }
 .library-rule-number :deep(.t-input-number__decrease), .library-rule-number :deep(.t-input-number__increase) { width: 28px; height: 32px; padding: 0; margin: 0; display: flex; align-items: center; justify-content: center; gap: 0; flex: 0 0 28px; line-height: 1; }
 .library-rule-number :deep(.t-input-number__decrease) { left: 0; }
 .library-rule-number :deep(.t-input-number__increase) { right: 0; }

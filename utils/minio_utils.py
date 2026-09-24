@@ -1,4 +1,4 @@
-﻿"""MinIO 客户端工具，采用按需连接避免导入模块时访问外部服务。"""
+"""MinIO 客户端工具，采用按需连接避免导入模块时访问外部服务。"""
 
 import json
 from threading import Lock

@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from config.milvus_config import milvus_config
 from processor.query_processor.base import NodeBase
+from processor.query_processor.retrieval_common import (
+    HYBRID_RANKER_WEIGHTS,
+    LIBRARY_FILTER_FIELD,
+    build_item_name_filter,
+    build_library_filter,
+    collection_field_names,
+    combine_filters,
+    normalize_hits,
+    resolve_output_fields,
+)
 from processor.query_processor.state import QueryGraphState
 from tool.logger import logger
 from utils.embedding_utils import generate_embeddings
@@ -35,72 +43,29 @@ class NodeSearchEmbedding(NodeBase):
             logger.warning("Milvus 检索集合不存在：%s", collection_name)
             state["embedding_chunks"] = []
             return state
-        field_names = self._get_collection_field_names(client, collection_name)
-        if "knowledge_base_id" not in field_names:
-            raise ValueError(f"检索集合缺少 knowledge_base_id 字段：{collection_name}")
-        expression = f"knowledge_base_id == {library_id}"
-        output_fields = [
-            field for field in self.OUTPUT_FIELDS
-            if field in field_names
-        ]
+        field_names = collection_field_names(client, collection_name)
+        if LIBRARY_FILTER_FIELD not in field_names:
+            raise ValueError(f"检索集合缺少 {LIBRARY_FILTER_FIELD} 字段：{collection_name}")
+        expression = combine_filters(
+            build_library_filter(library_id),
+            build_item_name_filter(state.get("item_names"), field_names),
+        )
+        output_fields = resolve_output_fields(field_names)
+        search_limit = max(int(state.get("retrieval_top_k") or 20), 10)
         requests = create_hybrid_search_requests(
             dense_vector=dense_vector,
             sparse_vector=sparse_vector,
             expr=expression,
-            limit=max(int(state.get("retrieval_top_k") or 20), 10),
+            limit=search_limit,
         )
         result = hybrid_search(
             client=client,
             collection_name=collection_name,
             reqs=requests,
-            ranker_weights=(0.8, 0.2),
-            limit=max(int(state.get("retrieval_top_k") or 20), 10),
+            ranker_weights=HYBRID_RANKER_WEIGHTS,
+            limit=search_limit,
             output_fields=output_fields,
         )
-        state["embedding_chunks"] = self._normalize_results(result)
+        state["embedding_chunks"] = normalize_hits(result)
         logger.info("知识库 %s 本地检索完成，命中 %s 个 Chunk", library_id, len(state["embedding_chunks"]))
         return state
-
-    OUTPUT_FIELDS = (
-        "chunk_id", "knowledge_base_id", "document_id", "document_version",
-        "chunk_index", "content", "title", "parent_title", "file_name",
-        "file_title", "source_page", "item_name", "entity_recognition_mode",
-        "chunk_type", "source_kind", "image_sources", "image_metadata",
-    )
-
-    @staticmethod
-    def _get_collection_field_names(client: Any, collection_name: str) -> set[str]:
-        description = client.describe_collection(collection_name=collection_name)
-        if isinstance(description, dict):
-            schema = description.get("schema")
-            fields = schema.get("fields", []) if isinstance(schema, dict) else description.get("fields", [])
-        else:
-            schema = getattr(description, "schema", None)
-            fields = getattr(schema, "fields", None) or getattr(description, "fields", [])
-        names: set[str] = set()
-        for field in fields or []:
-            name = field.get("name") if isinstance(field, dict) else getattr(field, "name", None)
-            if name:
-                names.add(str(name))
-        return names
-
-    @staticmethod
-    def _normalize_results(result: Any) -> list[dict[str, Any]]:
-        """兼容 MilvusClient 返回的 entity 嵌套和扁平两种结果格式。"""
-        if not result:
-            return []
-        hits = result[0] if isinstance(result, list) and result and isinstance(result[0], list) else result
-        normalized: list[dict[str, Any]] = []
-        for hit in hits or []:
-            if not isinstance(hit, dict):
-                continue
-            entity = hit.get("entity") if isinstance(hit.get("entity"), dict) else hit
-            item = dict(entity)
-            if "chunk_id" not in item and hit.get("id") is not None:
-                item["chunk_id"] = hit["id"]
-            if hit.get("distance") is not None:
-                item["vector_score"] = float(hit["distance"])
-            item.setdefault("source", "local")
-            if item.get("chunk_id") is not None:
-                normalized.append(item)
-        return normalized

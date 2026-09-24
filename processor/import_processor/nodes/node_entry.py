@@ -7,7 +7,6 @@
 """
 import json
 import logging
-import sys
 from pathlib import Path
 
 from processor.import_processor.base import BaseNode, setup_logging

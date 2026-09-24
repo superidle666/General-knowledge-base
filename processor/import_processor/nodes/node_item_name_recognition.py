@@ -20,7 +20,6 @@ from processor.import_processor.base import BaseNode, setup_logging
 from processor.import_processor.exceptions import StateFieldError
 from processor.import_processor.state import ImportGraphState
 from utils.embedding_utils import generate_embeddings
-from utils.milvus_utils import get_milvus_client
 
 
 class NodeItemNameRecognition(BaseNode):

@@ -29,6 +29,8 @@ const libraries = ref<UserLibrary[]>([])
 const libraryError = ref('')
 const anonymousLimitDialogVisible = ref(false)
 const libraryExpanded = ref(false)
+// 联网搜索留给用户选择（会引入外部资料，需用户知情）；HyDE 是知识库级策略，由管理端配置
+const useWebSearch = ref(false)
 const librarySwitchNotice = ref('')
 let libraryNoticeTimer: number | undefined
 const { isLoading: isSending, error: queryError, sources: querySources, submit: submitQuery, reset: resetQuery, restore: restoreQuery } = useUserQuery()
@@ -44,10 +46,13 @@ const selectedLibrary = computed(() => libraries.value.find((item) => item.name 
 const activeLibraryName = computed(() => selectedLibrary.value?.name || '未选择知识库')
 const sources = computed<UserSource[]>(() => querySources.value.map((source, index) => {
   const score = source.score === null ? null : source.score > 1 ? source.score : source.score * 100
+  const isWebSource = source.source === 'web'
   return {
-    id: String(source.chunk_id ?? `${source.document_id ?? 'source'}-${index}`),
+    id: String(source.chunk_id ?? `${isWebSource ? 'web' : 'source'}-${index}`),
     title: source.document_title || source.section_title || '未命名文档',
-    type: source.page_number ? `知识库文档 · 第 ${source.page_number} 页` : '知识库文档',
+    type: isWebSource
+      ? `联网资料${source.site_name ? ` · ${source.site_name}` : ''}`
+      : source.page_number ? `知识库文档 · 第 ${source.page_number} 页` : '知识库文档',
     score: score === null ? '--' : `${Math.round(score)}%`,
     color: ['#2563eb', '#0f9d78', '#c47f1d'][index % 3],
     content: source.content,
@@ -57,6 +62,9 @@ const sources = computed<UserSource[]>(() => querySources.value.map((source, ind
     pageNumber: source.page_number,
     sectionTitle: source.section_title,
     parentTitle: source.parent_title,
+    kind: isWebSource ? 'web' : 'local',
+    url: source.url,
+    siteName: source.site_name,
   }
 }))
 const chatTitle = computed(() => messages.value.slice().reverse().find((message) => message.role === 'user')?.content || '开始一次新的技术咨询')
@@ -349,8 +357,7 @@ async function sendMessage() {
       query: text,
       session_id: currentSessionId.value || undefined,
       top_k: 5,
-      use_hyde: false,
-      use_web_search: false,
+      use_web_search: useWebSearch.value,
     }, (delta) => {
       if (!isCurrentQueryContext(context, libraryId)) return
       updateAssistantMessage(assistantMessageId, {
@@ -406,7 +413,7 @@ onMounted(loadLibraries)
   <UserLayout :dark-mode="darkMode">
     <UserSidebar :mobile-open="mobileSidebarOpen" :libraries="libraries" :active-library="activeLibrary" :conversations="conversations" :search-query="searchQuery" :library-expanded="libraryExpanded" :display-name="displayName" :role-label="roleLabel" :avatar-text="avatarText" @create-conversation="createConversation" @select-library="selectLibrary" @select-conversation="selectConversation" @rename-conversation="renameConversation" @delete-conversation="deleteConversation" @update:search-query="searchQuery = $event" @close-mobile="mobileSidebarOpen = false" @toggle-library="libraryExpanded = !libraryExpanded" />
     <div v-if="mobileSidebarOpen" class="mobile-backdrop" @click="mobileSidebarOpen = false"></div>
-    <main class="workspace"><div v-if="librarySwitchNotice" class="library-switch-toast" role="status">{{ librarySwitchNotice }}</div><UserTopbar :dark-mode="darkMode" :active-library="activeLibraryName" :live-data="libraries.length > 0" :logged-in="isLoggedIn" :display-name="displayName" :role-label="roleLabel" :avatar-text="avatarText" @open-menu="mobileSidebarOpen = true" @toggle-theme="toggleTheme" @login="goToLogin" @logout="logout" /><div class="content-grid"><UserChatPanel :messages="messages" :input-text="inputText" :is-sending="isSending" :source-panel-open="sourcePanelOpen" :title="chatTitle" :source-count="sources.length" @toggle-sources="sourcePanelOpen = !sourcePanelOpen" @update:input-text="inputText = $event" @send="sendMessage" @suggestion="useSuggestion" /><UserSourcePanel :open="sourcePanelOpen" :active-library="activeLibraryName" :sources="sources" :document-count="selectedLibrary?.count || 0" :updated-at="selectedLibrary?.updatedAt || null" @close="sourcePanelOpen = false" /></div><p v-if="queryMessage" class="user-query-error">{{ queryMessage }}</p></main>
+    <main class="workspace"><div v-if="librarySwitchNotice" class="library-switch-toast" role="status">{{ librarySwitchNotice }}</div><UserTopbar :dark-mode="darkMode" :active-library="activeLibraryName" :live-data="libraries.length > 0" :logged-in="isLoggedIn" :display-name="displayName" :role-label="roleLabel" :avatar-text="avatarText" @open-menu="mobileSidebarOpen = true" @toggle-theme="toggleTheme" @login="goToLogin" @logout="logout" /><div class="content-grid"><UserChatPanel :messages="messages" :input-text="inputText" :is-sending="isSending" :source-panel-open="sourcePanelOpen" :title="chatTitle" :source-count="sources.length" :use-web-search="useWebSearch" @toggle-sources="sourcePanelOpen = !sourcePanelOpen" @update:input-text="inputText = $event" @update:use-web-search="useWebSearch = $event" @send="sendMessage" @suggestion="useSuggestion" /><UserSourcePanel :open="sourcePanelOpen" :active-library="activeLibraryName" :sources="sources" :document-count="selectedLibrary?.count || 0" :updated-at="selectedLibrary?.updatedAt || null" @close="sourcePanelOpen = false" /></div><p v-if="queryMessage" class="user-query-error">{{ queryMessage }}</p></main>
     <t-dialog v-model:visible="anonymousLimitDialogVisible" header="登录后继续咨询" confirm-btn="去登录" cancel-btn="暂不登录" @confirm="confirmLoginAfterLimit">
       <p>匿名体验已使用 3 条消息。登录后可继续使用知识库问答功能。</p>
     </t-dialog>

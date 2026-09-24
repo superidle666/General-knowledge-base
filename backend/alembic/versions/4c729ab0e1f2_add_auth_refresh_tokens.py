@@ -1,4 +1,4 @@
-﻿"""add refresh token persistence
+"""add refresh token persistence
 
 Revision ID: 4c729ab0e1f2
 Revises: 653972cf4482

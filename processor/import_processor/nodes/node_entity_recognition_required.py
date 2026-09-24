@@ -1,6 +1,5 @@
-﻿"""实体识别强制模式节点。"""
+"""实体识别强制模式节点。"""
 
-from collections.abc import Callable
 from typing import Any
 
 from processor.import_processor.base import BaseNode, setup_logging

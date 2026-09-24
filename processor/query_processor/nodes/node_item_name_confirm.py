@@ -44,7 +44,7 @@ class NodeItemNameConfirm(NodeBase):
 
         # 步骤1：校验参数
         session_id, original_query = self._step_1_validate_param(state)
-        logger.info(f"步骤1：参数校验通过")
+        logger.info("步骤1：参数校验通过")
 
         # 步骤2：获取历史记录
         history = get_recent_messages(session_id)

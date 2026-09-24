@@ -32,35 +32,37 @@ TASK_STATUS_COMPLETED = "completed"
 TASK_STATUS_FAILED = "failed"
 
 # 节点名 -> 中文名映射（用于前端展示）
-# 说明：这里的 key 应与 LangGraph 的 add_node("xxx", ...) 中的节点名一致。
+# 说明：这里的 key 必须与 LangGraph 的 add_node("xxx", ...) 完全一致，未接入图的节点不得预先写进映射表，
+# 否则前端会展示出根本不会发生的步骤名。一致性由 tests/test_task_lifecycle.py 静态校验两张图的注册表。
 _NODE_NAME_TO_CN: Dict[str, str] = {
-    "upload_file": "开始上传文件",  
+    # --- Import 流程节点（processor/import_processor/main_graph.py）---
     "node_entry": "检查文件",
     "node_pdf_to_md": "PDF转Markdown",
     "node_md_img": "Markdown图片处理",
-    "node_item_name_recognition": "主体名称识别",
     "node_document_split": "文档切分",
+    "node_entity_recognition_disabled": "跳过实体识别",
+    "node_entity_recognition_optional": "实体识别(可选)",
+    "node_entity_recognition_required": "实体识别(强制)",
     "node_bge_embedding": "向量生成",
-    "node_import_kg": "导入知识图谱",
     "node_import_milvus": "导入向量库",
-    "__end__": "处理完成",
-    "END": "处理完成",
-    # --- Query 流程节点（kb/query_process/main_graph.py）---
-    "node_item_name_confirm": "确认问题产品",
-    "node_answer_output": "生成答案",
-    "node_rerank": "重排序",
-    "node_rrf": "倒排融合",
-    "node_web_search_mcp": "网络搜索",
+    "node_persist_chunks": "保存切片",
+    # --- Query 流程节点（processor/query_processor/main_graph.py）---
+    "node_prepare_query": "准备问题",
     "node_search_embedding": "切片搜索",
     "node_search_embedding_hyde": "切片搜索(假设性文档)",
-    "node_multi_search": "多路搜索",
-    "node_query_kg": "查询知识图谱",
-    "node_join": "多路搜索合并",
+    "node_web_search_mcp": "网络搜索",
+    "node_rrf": "倒排融合",
+    "node_rerank": "重排序",
+    "node_source_collection": "汇聚来源",
+    "node_answer_output": "生成答案",
+    # --- LangGraph 内置终止节点 ---
+    "__end__": "处理完成",
+    "END": "处理完成",
 }
 
 
 def _ensure_task(task_id: str) -> None:
-    """确保 task_id 对应的数据结构已初始化。"""
+    """惰性初始化任务结构；调用方遍布各节点，在此统一兜底避免 KeyError。"""
     if task_id not in _tasks_running_list:
         _tasks_running_list[task_id] = []
     if task_id not in _tasks_done_list:
@@ -151,24 +153,17 @@ def get_task_status(task_id: str ) -> str:
 
 
 def get_done_task_list(task_id: str) -> List[str]:
-    """
-    获取已完成节点列表（中文展示）。
-
- 
-    """
+    """返回已完成节点的中文展示名列表，供 SSE 进度事件使用。"""
     _ensure_task(task_id)
     done = _tasks_done_list.get(task_id, [])
-    return [ _to_cn(n)  for n in done]
+    return [_to_cn(n) for n in done]
 
 
 def get_running_task_list(task_id: str) -> List[str]:
-    """
-    获取正在运行节点列表（中文展示）。
- 
-    """
+    """返回正在运行节点的中文展示名列表，供 SSE 进度事件使用。"""
     _ensure_task(task_id)
     running = _tasks_running_list.get(task_id, [])
-    return [ _to_cn(n)  for n in running]
+    return [_to_cn(n) for n in running]
 
 
 

@@ -79,19 +79,46 @@ async def _get_active_library(session: AsyncSession, library_id: int) -> Library
     return library
 
 
+def _web_source_out(source: dict) -> QuerySourceOut:
+    """联网来源不参与 MySQL 回填：它的可信标识就是 URL 本身。"""
+    try:
+        score = float(source.get("score"))
+    except (TypeError, ValueError):
+        score = None
+    url = str(source.get("url") or "").strip() or None
+    title = str(source.get("title") or "").strip()
+    site_name = str(source.get("site_name") or "").strip() or None
+    return QuerySourceOut(
+        document_title=title or site_name or url or "联网资料",
+        content=str(source.get("content") or "").strip(),
+        score=score,
+        source="web",
+        url=url,
+        site_name=site_name,
+    )
+
+
 async def _hydrate_sources(
     session: AsyncSession,
     library_id: int,
     sources: list[dict],
 ) -> list[QuerySourceOut]:
-    """以 MySQL 为准补齐来源展示信息，并过滤已删除或未完成文档。"""
-    source_by_vector_id = {
-        str(source["chunk_id"]): source
-        for source in sources
-        if source.get("source", "local") == "local" and source.get("chunk_id") is not None
-    }
+    """以 MySQL 为准补齐本地来源展示信息，并过滤已删除或未完成文档；联网来源直接透传。
+
+    本地走 MySQL 而不是直接信任向量库返回值，是为了避免文档已删除但索引未清理时仍被引用；
+    联网结果没有库内主键，因此不能被同一套校验覆盖。
+    """
+    hydrated: list[QuerySourceOut] = []
+    source_by_vector_id: dict[str, dict] = {}
+    for source in sources:
+        if str(source.get("source") or "local") == "web":
+            hydrated.append(_web_source_out(source))
+            continue
+        if source.get("chunk_id") is not None:
+            source_by_vector_id[str(source["chunk_id"])] = source
     if not source_by_vector_id:
-        return []
+        hydrated.sort(key=lambda item: (item.score is None, -(item.score or 0)))
+        return hydrated
     rows = await session.execute(
         select(DocumentChunk, Document)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -102,7 +129,6 @@ async def _hydrate_sources(
             DocumentChunk.vector_id.in_(source_by_vector_id),
         )
     )
-    hydrated: list[QuerySourceOut] = []
     for chunk, document in rows:
         source = source_by_vector_id.get(str(chunk.vector_id))
         if source is None:
@@ -315,17 +341,21 @@ async def query_knowledge_base(
     user: AuthenticatedUser | None = Depends(get_optional_current_user),
 ) -> QueryResponse:
     """查询单个知识库；当前阶段不执行成员或可见范围权限过滤。"""
-    await _get_active_library(session, payload.library_id)
+    library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
     try:
         workflow = KBQueryWorkflow()
-        result = workflow.run({
+        # 工作流内部是同步阻塞调用（BGE-M3 编码、Milvus、LLM，合计可达数十秒），
+        # 必须挪到线程池执行：直接在本协程里跑会冻结整个事件循环，
+        # 使该请求期间所有其他请求（含 SSE 心跳）都无法响应；
+        # 联网检索节点内部的 asyncio.run 也只有在“当前线程无运行循环”时才可用。
+        result = await asyncio.to_thread(workflow.run, {
             "library_id": payload.library_id,
             "original_query": payload.query,
             "session_id": session_id,
             "history": history,
             "top_k": payload.top_k,
-            "use_hyde": payload.use_hyde,
+            "use_hyde": bool(library.use_hyde),
             "use_web_search": payload.use_web_search,
             "is_stream": False,
             "persist_history": False,
@@ -359,7 +389,7 @@ async def stream_query_knowledge_base(
     user: AuthenticatedUser | None = Depends(get_optional_current_user),
 ) -> StreamingResponse:
     """以 SSE 增量返回知识库回答；客户端可通过 fetch 请求携带认证头。"""
-    await _get_active_library(session, payload.library_id)
+    library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
     stream_id = f"query-stream-{uuid.uuid4().hex}"
     create_sse_queue(stream_id)
@@ -372,7 +402,7 @@ async def stream_query_knowledge_base(
                 "session_id": stream_id,
                 "history": history,
                 "top_k": payload.top_k,
-                "use_hyde": payload.use_hyde,
+                "use_hyde": bool(library.use_hyde),
                 "use_web_search": payload.use_web_search,
                 "is_stream": True,
                 "persist_history": False,

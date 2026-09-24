@@ -49,6 +49,8 @@ const createMaxUploadFileCount = ref<number>()
 const createChunkSize = ref<number>()
 const createChunkOverlap = ref<number>()
 const createVisibility = ref<LibraryVisibility>('private')
+// HyDE 属于知识库级检索规则：普通用户看不懂该术语，因此开关只放在管理端，默认关闭。
+const createUseHyde = ref(false)
 const editingId = ref<number>()
 const editName = ref('')
 const editDescription = ref('')
@@ -60,6 +62,7 @@ const editMaxUploadFileCount = ref<number>()
 const editChunkSize = ref<number>()
 const editChunkOverlap = ref<number>()
 const editVisibility = ref<LibraryVisibility>('private')
+const editUseHyde = ref(false)
 const creating = ref(false)
 const savingEdit = ref(false)
 const changingStatusId = ref<number>()
@@ -89,6 +92,7 @@ function resetCreateForm() {
   createChunkSize.value = undefined
   createChunkOverlap.value = undefined
   createVisibility.value = 'private'
+  createUseHyde.value = false
 }
 
 /** 打开指定知识库下方的独立编辑表单。 */
@@ -107,6 +111,7 @@ function startEdit(library: Library) {
   editChunkSize.value = getChunkingValue(library, 'chunk_size')
   editChunkOverlap.value = getChunkingValue(library, 'chunk_overlap')
   editVisibility.value = library.visibility || 'private'
+  editUseHyde.value = Boolean(library.use_hyde)
 }
 
 /** 关闭行内编辑并清除临时编辑值。 */
@@ -129,6 +134,7 @@ function buildRulePayload(
   chunkSize: number | undefined,
   chunkOverlap: number | undefined,
   visibility: LibraryVisibility,
+  useHyde: boolean,
 ) {
   return {
     allowed_file_types: allowedFileTypes.length ? allowedFileTypes : null,
@@ -139,6 +145,7 @@ function buildRulePayload(
       ? { chunk_size: chunkSize, chunk_overlap: chunkOverlap || 0 }
       : null,
     visibility,
+    use_hyde: useHyde,
   }
 }
 
@@ -164,7 +171,8 @@ function formatLibraryRules(library: Library) {
   const size = library.max_file_size_mb ? `${library.max_file_size_mb} MB/文件` : '未限制大小'
   const batch = library.max_upload_file_count ? `${library.max_upload_file_count} 个/次` : '未限制批次'
   const visibility = library.visibility === 'shared' ? '共享' : '私有'
-  return `${entityModeLabels[library.entity_recognition_mode]} · ${fileTypes} · ${size} · ${batch} · ${visibility}`
+  const hyde = library.use_hyde ? 'HyDE已开启' : 'HyDE已关闭'
+  return `${entityModeLabels[library.entity_recognition_mode]} · ${fileTypes} · ${size} · ${batch} · ${visibility} · ${hyde}`
 }
 
 /** 根据名称生成符合后端约束的知识库编码。 */
@@ -203,6 +211,7 @@ async function createLibrary() {
         createChunkSize.value,
         createChunkOverlap.value,
         createVisibility.value,
+        createUseHyde.value,
       ),
     })
     resetCreateForm()
@@ -238,6 +247,7 @@ async function saveLibraryEdit() {
         editChunkSize.value,
         editChunkOverlap.value,
         editVisibility.value,
+        editUseHyde.value,
       ),
     })
     cancelEdit()
@@ -346,6 +356,14 @@ watch(
             <t-input-number class="library-rule-number" v-model="createChunkOverlap" label="切片重叠（字符）" :min="0" clearable />
           </div>
         </div>
+        <div class="library-rule-panel">
+          <div class="library-rule-panel-heading"><strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span></div>
+          <div class="library-hyde-field">
+            <span class="library-hyde-label">HyDE 扩展召回</span>
+            <t-switch v-model="createUseHyde" :label="['已开启', '已关闭']" />
+            <small class="library-hyde-hint">先让大模型生成假设性答案再检索，可提升召回；代价是该知识库每次问答多一次大模型调用、回答更慢，默认关闭。用户端不再提供该开关。</small>
+          </div>
+        </div>
         <t-textarea v-model="createDescription" label="描述" placeholder="知识库用途说明（可选）" />
       </div>
       <div class="library-form-actions">
@@ -431,6 +449,14 @@ watch(
                 <t-input-number class="library-rule-number" v-model="editChunkOverlap" label="切片重叠（字符）" :min="0" clearable />
               </div>
             </div>
+            <div class="library-rule-panel">
+              <div class="library-rule-panel-heading"><strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span></div>
+              <div class="library-hyde-field">
+                <span class="library-hyde-label">HyDE 扩展召回</span>
+                <t-switch v-model="editUseHyde" :label="['已开启', '已关闭']" />
+                <small class="library-hyde-hint">开启后每次问答多一次大模型调用，回答更慢、用量更高；用户端不再提供该开关。</small>
+              </div>
+            </div>
             <t-textarea v-model="editDescription" label="描述" />
             <div class="library-form-actions">
               <t-button variant="outline" @click="cancelEdit">取消</t-button>
@@ -478,6 +504,9 @@ watch(
 .library-manager-item span { overflow: hidden; color: #9ca3af; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .library-manager-item .library-rule-summary { color: #64748b; }
 .library-rule-number { width: 100%; }
+.library-hyde-field { display: grid; gap: 6px; align-content: start; }
+.library-hyde-label { color: rgb(0 10 31 / 85%); font-size: 14px; line-height: 22px; }
+.library-hyde-hint { color: #64748b; font-size: 11px; line-height: 1.5; }
 .library-rule-number :deep(.t-input-number) { width: 100%; padding: 0 28px; }
 .library-rule-number :deep(.t-input-number__decrease), .library-rule-number :deep(.t-input-number__increase) {
   width: 28px;

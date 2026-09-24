@@ -162,7 +162,10 @@ class NodeAnswerOutput(NodeBase):
         #    确保 Prompt 长度在 LLM 的处理范围内，避免 Token 溢出。
         # ---------------------------------------------------------
         for idx, doc in enumerate(reranked_docs, start=1):
-            content = doc.get("content")
+            content = str(doc.get("content") or "").strip()
+            if not content:
+                # 空正文对模型没有任何信息量，进 prompt 只是白占预算
+                continue
             meta_tags = [f"[{idx}]"]
             for field, template in [
                 ("source", "[source={}]"),
@@ -170,7 +173,11 @@ class NodeAnswerOutput(NodeBase):
                 ("url", "[url={}]"),
                 ("title", "[title={}]"),
             ]:
-                field_value = str(doc.get(field)).strip()
+                raw_value = doc.get(field)
+                if raw_value is None:
+                    # 跳过而不是 str(None)：否则本地来源会带上 [url=None]，模型会把它当成真实链接引用
+                    continue
+                field_value = str(raw_value).strip()
                 if field_value:
                     meta_tags.append(template.format(field_value))
 
@@ -349,10 +356,10 @@ class NodeAnswerOutput(NodeBase):
                 image_urls.append(image_url)
         return image_urls
 
-    def _step_4_write_history(seld, state: QueryGraphState, image_urls=None) -> QueryGraphState:
+    def _step_4_write_history(self, state: QueryGraphState, image_urls=None) -> QueryGraphState:
         """
         阶段四：把本轮答案写入 MongoDB history。
-        利用 utils/mongo_history_utils.py 中的 save_chat_messages 方法。
+        利用 utils/mongo_history_utils.py 中的 save_chat_message 方法。
         """
         session_id = state.get("session_id", "default")
         answer = (state.get("answer") or "").strip()

@@ -183,6 +183,7 @@ class LibraryCreate(BaseModel):
     max_document_count: int | None = Field(default=None, ge=1)
     max_upload_file_count: int | None = Field(default=None, ge=1)
     chunking_config: dict[str, Any] | None = None
+    use_hyde: bool = False
     visibility: str = Field(default="private", pattern="^(private|shared)$")
 
     @field_validator("max_file_size_mb", mode="before")
@@ -204,6 +205,7 @@ class LibraryUpdate(BaseModel):
     max_document_count: int | None = Field(default=None, ge=1)
     max_upload_file_count: int | None = Field(default=None, ge=1)
     chunking_config: dict[str, Any] | None = None
+    use_hyde: bool | None = None
     visibility: str | None = Field(default=None, pattern="^(private|shared)$")
 
     @field_validator("max_file_size_mb", mode="before")
@@ -226,6 +228,7 @@ class LibraryOut(BaseModel):
     max_document_count: int | None
     max_upload_file_count: int | None
     chunking_config: dict[str, Any] | None
+    use_hyde: bool
     visibility: str
     document_count: int
     created_by: int | None
@@ -314,7 +317,8 @@ class QueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
     top_k: int = Field(default=5, ge=1, le=10)
-    use_hyde: bool = False
+    # HyDE 不在请求体里：它会多一次大模型调用并抬高时延，用户也无法判断开关收益，
+    # 因此统一由知识库规则决定（见 Library.use_hyde），接口层注入工作流状态。
     use_web_search: bool = False
 
     @field_validator("query")
@@ -327,7 +331,7 @@ class QueryRequest(BaseModel):
 
 
 class QuerySourceOut(BaseModel):
-    """用户端展示的单条知识库来源。"""
+    """用户端展示的单条检索来源；source=web 时没有库内 ID，只靠 url 溯源。"""
 
     chunk_id: str | int | None = None
     document_id: int | None = None
@@ -339,6 +343,8 @@ class QuerySourceOut(BaseModel):
     content: str = ""
     score: float | None = None
     source: str = "local"
+    url: str | None = None
+    site_name: str | None = None
 
 
 class QueryLibraryOut(BaseModel):

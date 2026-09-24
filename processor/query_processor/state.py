@@ -28,12 +28,15 @@ class QueryGraphState(TypedDict, total=False):
     # 检索过程中的中间数据
     embedding_chunks: list  # 普通向量检索回来的切片
     hyde_embedding_chunks: list  # 已向量化的假设性问题切片
+    hyde_doc: str  # 大模型生成的假设性答案原文
     web_search_docs: list  # 网络搜索回来的文档
 
     # 排序过程中的数据
     rrf_chunks: list  # RRF 融合排序后的切片
     reranked_docs: list  # 重排序后的最终 Top-K 文档
     rerank_failed: bool  # 重排序服务是否失败并回退到原始召回
+    hyde_failed: bool  # HyDE 链路是否失败（失败时该路召回为空，不阻断主链路）
+    web_search_failed: bool  # 联网检索是否失败（失败时仅用本地结果继续回答）
     sources: list  # 面向用户端的来源列表
 
     # 生成过程中的数据

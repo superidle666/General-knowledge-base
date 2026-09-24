@@ -142,6 +142,9 @@ class Library(TimestampMixin, SoftDeleteMixin, Base):
     max_document_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_upload_file_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunking_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # HyDE 会多一次大模型调用并明显抬高时延和成本，用户也不知道这个缩写；
+    # 因此作为知识库级策略由管理端配置，而不是让每次问答请求自行决定。
+    use_hyde: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0", nullable=False)
     visibility: Mapped[str] = mapped_column(String(20), default="private", server_default="private", nullable=False)
     deleted_by: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
 

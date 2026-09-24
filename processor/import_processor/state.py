@@ -1,4 +1,4 @@
-﻿"""导入流程状态类型定义。"""
+"""导入流程状态类型定义。"""
 
 from copy import deepcopy
 import asyncio

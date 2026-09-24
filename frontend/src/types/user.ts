@@ -66,4 +66,8 @@ export type UserSource = {
   pageNumber: number | null
   sectionTitle: string | null
   parentTitle: string | null
+  // 联网来源没有库内 ID，只能靠 url 溯源；缺省按本地知识库来源处理
+  kind?: 'local' | 'web'
+  url?: string | null
+  siteName?: string | null
 }

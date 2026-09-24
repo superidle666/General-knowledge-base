@@ -78,7 +78,9 @@ class NodeRerank(NodeBase):
                 "title": web_doc.get('title'),
                 "chunk_id": None,
                 "url": web_doc.get('url'),
-                "source": "web"
+                "source": "web",
+                # 站点名随链路透传，供来源面板展示“这是哪家网站”而不是重复一遍页面标题
+                "site_name": web_doc.get('site_name'),
             }
             final_docs.append(format_web_doc)
 

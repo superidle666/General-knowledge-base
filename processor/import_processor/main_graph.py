@@ -1,6 +1,5 @@
-﻿"""新版知识库导入 LangGraph 工作流。"""
+"""新版知识库导入 LangGraph 工作流。"""
 
-from typing import Any
 
 from langgraph.constants import END
 from langgraph.graph import StateGraph
@@ -18,7 +17,7 @@ from processor.import_processor.nodes.node_import_milvus import NodeImportMilvus
 from processor.import_processor.nodes.node_md_img import NodeMDImg
 from processor.import_processor.nodes.node_pdf_to_md import NodePDFToMD
 from processor.import_processor.nodes.node_persist_chunks import NodePersistChunks
-from processor.import_processor.state import EntityRecognitionMode, ImportGraphState, get_default_state
+from processor.import_processor.state import ImportGraphState, get_default_state
 
 
 ENTITY_RECOGNITION_NODE_NAMES: dict[str, str] = {

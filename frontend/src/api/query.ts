@@ -8,7 +8,7 @@ export type QueryRequest = {
   query: string
   session_id?: string
   top_k?: number
-  use_hyde?: boolean
+  // HyDE 不在请求体里：它由知识库管理端按库配置，用户端不感知也不可选
   use_web_search?: boolean
 }
 
@@ -23,6 +23,8 @@ export type QuerySource = {
   content: string
   score: number | null
   source: string
+  url: string | null
+  site_name: string | null
 }
 
 export type QueryResponse = {

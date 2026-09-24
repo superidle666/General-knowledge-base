@@ -135,7 +135,7 @@ class NodePDFToMD(BaseNode):
             if res_upload.status_code != 200:
                 raise PdfConversionError(f"文件上传失败：状态码：{res_upload.status_code}，响应结果：{res_upload}")
 
-            self.logger.info(f"文件上传成功！")
+            self.logger.info("文件上传成功！")
 
         # 4、批量获取任务结果
         poll_url = f"{mineru_config.base_url}/extract-results/batch/{batch_id}"
@@ -232,9 +232,9 @@ class NodePDFToMD(BaseNode):
         self.logger.info(f"【ZIP解压】ZIP解压完成，解压目录：{extract_target_dir}")
 
         # 5、重命名
-        self.logger.info(f"【MD重命名】找到MinerU生成的full.md文件")
+        self.logger.info("【MD重命名】找到MinerU生成的full.md文件")
         target_md_file = extract_target_dir / "full.md"
-        self.logger.info(f"【MD重命名】开始将full.md文件进行重命名")
+        self.logger.info("【MD重命名】开始将full.md文件进行重命名")
         new_md_path = target_md_file.with_name(f"{pdf_stem}.md")
         target_md_file.rename(new_md_path)
         self.logger.info(f"【MD重命名】重命名成功，文件名：{pdf_stem}.md")

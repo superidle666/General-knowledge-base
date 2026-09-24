@@ -1,4 +1,4 @@
-﻿"""normalize document lifecycle statuses
+"""normalize document lifecycle statuses
 
 Revision ID: 20260903_0002
 Revises: 4574bd21512a

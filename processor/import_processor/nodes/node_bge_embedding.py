@@ -1,7 +1,5 @@
-"""????????????"""
+"""BGE-M3 向量生成节点，为文档切片产出稠密与稀疏双路向量。"""
 
-import json
-import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -31,21 +29,21 @@ class NodeBGEEmbedding(BaseNode):
         return state
 
     def _step_1_validate_input(self, state: ImportGraphState) -> list[dict[str, Any]]:
-        """??????????????????"""
+        """校验切片结构；正文为空的切片会让稀疏向量退化为全零，必须在批量调用前拒掉。"""
         chunks = state.get("chunks")
         if not isinstance(chunks, list) or not chunks:
             raise StateFieldError(
                 node_name=self.name,
                 field_name="chunks",
                 expected_type=list,
-                message="?????????????",
+                message="向量化前必须存在至少一个文档切片",
             )
         if not all(isinstance(chunk, dict) for chunk in chunks):
             raise StateFieldError(
                 node_name=self.name,
                 field_name="chunks",
                 expected_type=list,
-                message="???????????",
+                message="文档切片必须是对象列表",
             )
         for chunk in chunks:
             if not isinstance(chunk.get("content"), str) or not chunk["content"].strip():
@@ -53,7 +51,7 @@ class NodeBGEEmbedding(BaseNode):
                     node_name=self.name,
                     field_name="chunks.content",
                     expected_type=str,
-                    message="???????????????",
+                    message="每个文档切片都必须包含非空正文内容",
                 )
         return chunks
 
@@ -73,10 +71,10 @@ class NodeBGEEmbedding(BaseNode):
                 dense_vectors = embeddings["dense"]
                 sparse_vectors = embeddings["sparse"]
                 if len(dense_vectors) != len(batch_chunks) or len(sparse_vectors) != len(batch_chunks):
-                    raise ValueError("????????????")
+                    raise ValueError("向量数量与切片数量不一致")
             except Exception as exc:
                 raise EmbeddingError(
-                    message=f"? {start + 1}-{start + len(batch_chunks)} ?????????",
+                    message=f"第 {start + 1}-{start + len(batch_chunks)} 个切片向量化失败",
                     node_name=self.name,
                     cause=exc,
                 ) from exc
@@ -87,7 +85,7 @@ class NodeBGEEmbedding(BaseNode):
                 enriched_chunk["sparse_vector"] = sparse_vectors[index]
                 output_data.append(enriched_chunk)
             self.logger.info(
-                "??????????=%s???=%s???=%s-%s???=%s",
+                "向量化批次完成：知识库=%s 文档=%s 切片=%s-%s 数量=%s",
                 state.get("knowledge_base_id") or state.get("library_id"),
                 state.get("document_id"),
                 start + 1,
@@ -97,11 +95,11 @@ class NodeBGEEmbedding(BaseNode):
         return output_data
 
     def _get_batch_size(self) -> int:
-        """????????????????"""
+        """读取批量大小配置；非法值必须立即失败，避免静默按 1 逐条推理拖慢导入。"""
         batch_size = int(self.config.embedding_batch_size)
         if batch_size < 1:
             raise EmbeddingError(
-                message="embedding_batch_size ??????",
+                message="embedding_batch_size 必须为正整数",
                 node_name=self.name,
             )
         return batch_size
@@ -122,13 +120,13 @@ class NodeBGEEmbedding(BaseNode):
         title = str(chunk.get("title") or "").strip()
         content = str(chunk.get("content") or "").strip()
         if item_names:
-            parts.append(f"\u5b9e\u4f53\uff1a{'、'.join(item_names)}")
+            parts.append(f"实体：{'、'.join(item_names)}")
         if file_title:
-            parts.append(f"\u6587\u6863\uff1a{file_title}")
+            parts.append(f"文档：{file_title}")
         section_title = " / ".join(value for value in (parent_title, title) if value)
         if section_title:
-            parts.append(f"\u7ae0\u8282\uff1a{section_title}")
-        parts.append(f"\u5185\u5bb9\uff1a{content}")
+            parts.append(f"章节：{section_title}")
+        parts.append(f"内容：{content}")
         return "\n".join(parts)
 
 
@@ -136,7 +134,7 @@ if __name__ == "__main__":
     setup_logging()
 
     def fake_embeddings(texts: list[str]) -> dict[str, Any]:
-        """????????????????"""
+        """返回固定结构的假向量，让阶段测试不加载真实模型。"""
         return {
             "dense": [[float(index), 1.0] for index, _ in enumerate(texts)],
             "sparse": [{index: 1.0} for index, _ in enumerate(texts)],
@@ -147,17 +145,17 @@ if __name__ == "__main__":
         "task_id": "embedding-test",
         "knowledge_base_id": 7,
         "document_id": 11,
-        "file_title": "?????",
+        "file_title": "设备说明书",
         "item_name": "",
         "chunks": [
-            {"title": "??", "parent_title": "????", "content": "???????"},
-            {"title": "??", "parent_title": "????", "content": "????"},
-            {"title": "??", "content": "????"},
+            {"title": "简介", "parent_title": "产品概述", "content": "设备外观与尺寸"},
+            {"title": "参数", "parent_title": "技术规格", "content": "额定电压"},
+            {"title": "保修", "content": "保修条款"},
         ],
     }
     result = NodeBGEEmbedding(embedding_generator=fake_embeddings, config=test_config)(init_state)
     assert len(result["chunks"]) == 3
     assert all("dense_vector" in chunk and "sparse_vector" in chunk for chunk in result["chunks"])
     assert result["chunks"][0]["item_name"] if "item_name" in result["chunks"][0] else True
-    assert NodeBGEEmbedding._build_embedding_text(init_state["chunks"][0], init_state).startswith("????????")
+    assert NodeBGEEmbedding._build_embedding_text(init_state["chunks"][0], init_state).startswith("文档：设备说明书")
     print("embedding stage 2 test passed")

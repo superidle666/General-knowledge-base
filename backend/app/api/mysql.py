@@ -25,7 +25,7 @@ from sqlalchemy.orm import selectinload
 from backend.app.api.schemas import (
     ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentTagsUpdate,
     DocumentUpdate, DocumentUploadOut, LibraryCreate, LibraryOut, LibraryUpdate,
-    ImportTaskOut, MemberCreate, MemberOut, OperationLogOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
+    ImportTaskOut, MemberCreate, MemberOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
     RoleCreate, RoleOut, RoleUpdate, TagCreate, TagOut, TagUpdate, UserCreate,
     UserOut, UserUpdate,
 )

@@ -32,6 +32,8 @@ export type Library = {
   max_document_count: number | null
   max_upload_file_count: number | null
   chunking_config: Record<string, unknown> | null
+  // 知识库级检索策略：HyDE 由管理端控制，不开放给问答请求
+  use_hyde: boolean
   visibility: "private" | "shared"
 }
 

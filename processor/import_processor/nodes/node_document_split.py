@@ -97,18 +97,18 @@ class NodeDocumentSplit(BaseNode):
         return state
 
     def _get_chunking_config(self, state: ImportGraphState) -> tuple[int, int, int]:
-        """?????????????????????????"""
+        """读取知识库级切分参数；非法值直接抛错，避免默默降级后产出无法回溯的切块。"""
         snapshot = state.get("config_snapshot") or {}
         chunking_config = snapshot.get("chunking_config") or {}
         max_content_length = int(chunking_config.get("chunk_size", self.config.max_content_length))
         min_content_length = int(chunking_config.get("min_content_length", self.config.min_content_length))
         chunk_overlap = int(chunking_config.get("chunk_overlap", 0))
         if max_content_length < 1:
-            raise ValueError("chunk_size ??????")
+            raise ValueError("chunk_size 必须为正整数")
         if min_content_length < 0:
-            raise ValueError("min_content_length ?????")
+            raise ValueError("min_content_length 不能为负数")
         if chunk_overlap < 0 or chunk_overlap >= max_content_length:
-            raise ValueError("chunk_overlap ?????????? chunk_size")
+            raise ValueError("chunk_overlap 不能为负数，且必须小于 chunk_size")
         return max_content_length, min_content_length, chunk_overlap
 
     def _build_content_blocks(self, state: ImportGraphState, content: str) -> list[ContentBlock]:
@@ -201,7 +201,7 @@ class NodeDocumentSplit(BaseNode):
         return sections, title_count, len(blocks)
 
     def _attach_chunk_metadata(self, state: ImportGraphState, sections: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        """?????????????????????????"""
+        """补齐知识库、文档、版本与实体等定位字段；这些字段是检索后回表取来源的唯一依据。"""
         import_path = state.get("import_file_path") or ""
         file_name = Path(import_path).name or state.get("file_title", "")
         for chunk_index, section in enumerate(sections):
@@ -444,7 +444,7 @@ class NodeDocumentSplit(BaseNode):
         for sec in final_sections:
             if not sec.get("parent_title"):
                 sec["parent_title"] = sec.get("title") or ""
-        self.logger.debug(f"步骤4-3：父标题兜底完成，所有Chunk均包含parent_title字段")
+        self.logger.debug("步骤4-3：父标题兜底完成，所有Chunk均包含parent_title字段")
 
         return final_sections
 
