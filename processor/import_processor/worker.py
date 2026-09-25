@@ -22,6 +22,7 @@ from backend.app.db.session import SessionLocal
 from config.redis_config import redis_config
 from processor.import_processor.main_graph import KBImportWorkflow
 from processor.import_processor.state import ImportGraphState
+from tool.logger import configure_logging
 from utils.import_queue import (
     acknowledge_import_task,
     create_redis_client,
@@ -384,6 +385,8 @@ class ImportWorker:
 
 async def main() -> None:
     """Start the Redis import worker process."""
+    # Worker 是一个独立进程，日志在这里显式配置；图节点内部的 import.* logger 全部向上冒泡。
+    configure_logging()
     worker = ImportWorker()
     await worker.run_forever()
 

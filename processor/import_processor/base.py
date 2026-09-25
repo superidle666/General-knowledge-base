@@ -5,10 +5,9 @@
 
 定义统一的节点接口规范，提供通用功能
 """
-import colorlog
-
 from processor.import_processor.import_config import ImportConfig, get_config
 from processor.import_processor.exceptions import ImportProcessError
+from tool.logger import configure_logging
 from utils.task_utils import add_running_task, add_done_task
 
 """
@@ -127,27 +126,13 @@ class BaseNode(ABC):
 # 配置日志格式
 def setup_logging(level: int = logging.INFO):
     """
-    配置日志格式
+    配置控制台日志格式（保留旧入口名，实现已收敛到 tool.logger）
+
+    以前这里自己 clear() 根日志器 handler 并重复一份格式定义，与 tool/logger.py
+    互相覆盖；现在两侧共用同一个幂等配置器，调用顺序不再影响结果。
+    仅供节点 / 图脚本的 __main__ 手动运行时调用，模块导入期不得调用。
 
     Args:
         level: 日志级别
     """
-
-    logger = logging.getLogger()
-    logger.setLevel(level)
-
-    handler = colorlog.StreamHandler()
-    handler.setFormatter(colorlog.ColoredFormatter(
-        '%(log_color)s%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S',
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',  # INFO 显示为绿色
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'bold_red',
-        }
-    ))
-
-    logger.handlers.clear()
-    logger.addHandler(handler)
+    return configure_logging(level)

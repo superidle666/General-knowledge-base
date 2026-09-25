@@ -4,14 +4,17 @@
 @FilePath: processor/query_processor/nodes/node_answer_output.py
 @Date: 2026-09-07
 @Description: 组装问答提示词、调用模型生成答案、筛选回答引用图片并发送最终结果。
-@BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL。
+@BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL；
+              白名单外的 markdown 图片（模型臆造的 URL）要从答案正文中剜除，
+              否则前端按 markdown 渲染整段答案时会直接展示出裂图。
 """
 
 import re
+import time
 from typing import List, Dict, Tuple
 
 from processor.query_processor.prompt.answer_prompt import ANSWER_PROMPT
-from tool.logger import logger
+from tool.logger import configure_logging, logger
 
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
@@ -22,6 +25,9 @@ from utils.task_utils import set_task_result, add_done_task
 
 MAX_CONTEXT_CHARS = 12000
 MAX_HISTORY_CHARS = 3000
+# 静态短答（闲聊话术/校验提示/拒答反问）不经检索与生成，瞬时送达会像"机器人占位"；
+# 推送前稍作停顿，让对话节奏接近真实回答。只加在流式 delta 推送前，非流式接口不拖慢。
+STATIC_REPLY_DELAY_SECONDS = 1.5
 
 class NodeAnswerOutput(NodeBase):
     """
@@ -66,6 +72,10 @@ class NodeAnswerOutput(NodeBase):
             state.get("reranked_docs") or [],
         )
         state["image_urls"] = image_urls
+        # 图片白名单之外的 markdown 引用是模型臆造的（参考内容里根本没有这张图），
+        # 前端按 markdown 渲染整段答案会直接出裂图；从正文剜除，写历史/非流式返回/FINAL
+        # 事件都走这一份清洗后的文本。
+        state["answer"] = self._sanitize_unverified_images(state.get("answer") or "", set(image_urls))
 
         # 阶段五：把答案写入到mongodb的history中
         if state.get("answer") and state.get("persist_history", True):
@@ -101,6 +111,8 @@ class NodeAnswerOutput(NodeBase):
           if answer:
             if is_stream:
               logger.info("---Step 1: 发现已有答案，执行流式推送---")
+              # 预置短答（闲聊话术等）零检索零生成，瞬时送达体验像占位符；停顿一下再推。
+              time.sleep(STATIC_REPLY_DELAY_SECONDS)
               push_to_session(state["session_id"], SSEEvent.DELTA, {"delta": answer})
             else:
               set_task_result(state["session_id"], "answer", answer)
@@ -196,27 +208,37 @@ class NodeAnswerOutput(NodeBase):
         return "\n\n".join(formatted_lines), char_budget - used_chars
 
     def _format_chat_history(self, chat_history: List[Dict], char_budget: int) -> Tuple[str, int]:
-        """格式化历史对话"""
-        formatted_lines = []
-        used_chars = 0
+        """格式化历史对话；预算截断时保留最近的几轮。
 
+        入参列表是时间正序（旧→新，get_recent_messages 保证）。此前从最旧开始
+        累加、超预算即停，留下的偏偏是最早的寒暄、追问最依赖的最近几轮被整体丢弃。
+        改为从新往旧收集，预算耗尽即止，输出时再恢复时间正序拼接。
+        """
         role_label_map = {"user": "用户", "assistant": "助手"}
 
-        for message in chat_history:
+        collected: List[str] = []
+        used_chars = 0
+
+        for message in reversed(chat_history):
             role = message.get("role", "")
             text = message.get("text", "")
             if not text or role not in role_label_map:
                 continue
 
             formatted_line = f"{role_label_map[role]}: {text}"
-            used_chars += len(formatted_line) + 1
+            line_chars = len(formatted_line) + 1
+            if used_chars + line_chars > char_budget:
+                # 连最近一条都装不下时选择截断而非丢弃：丢掉最新一轮对追问的伤害
+                # 大于预算轻微溢出，且下游文档预算本就先于历史被压缩。
+                if not collected:
+                    collected.append(formatted_line[:max(char_budget, 0)])
+                    used_chars = char_budget
+                break
 
-            if used_chars > char_budget:
-                return "\n".join(formatted_lines), char_budget - used_chars
+            collected.append(formatted_line)
+            used_chars += line_chars
 
-            formatted_lines.append(formatted_line)
-
-        return "\n".join(formatted_lines), char_budget - used_chars
+        return "\n".join(reversed(collected)), char_budget - used_chars
 
 
     def _step_3_generate_response(self, state: QueryGraphState, prompt: str) -> QueryGraphState:
@@ -356,6 +378,43 @@ class NodeAnswerOutput(NodeBase):
                 image_urls.append(image_url)
         return image_urls
 
+    # 答案正文里的 markdown 图片（允许描述文字带空格）；URL 捕获后交给白名单判定。
+    _ANSWER_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*(\S*?)(?:\s+\"[^\"]*\")?\s*\)")
+
+    @classmethod
+    def _sanitize_unverified_images(cls, answer: str, verified_urls: set[str]) -> str:
+        """剥掉答案正文里未通过白名单校验的 markdown 图片。
+
+        模型会臆造\n![外观图](http://...不存在的链接)\n（尤其参考内容里有图片语法模板时），
+        这些 URL 不在召回切片里，前端渲染就是裂图；整行删除并收敛多余空行，
+        顺带去掉了配套的\n图片说明：...\n文字（用户要求只贴图不写说明）。
+        """
+        if not answer:
+            return answer
+
+        removed: list[str] = []
+
+        def _drop_if_unverified(match: re.Match) -> str:
+            url = match.group(1).strip().rstrip(",.;，。；）")
+            if url and url in verified_urls:
+                return match.group(0)
+            removed.append(match.group(0))
+            return ""
+
+        cleaned = cls._ANSWER_MD_IMAGE_RE.sub(_drop_if_unverified, answer)
+        if removed:
+            logger.info("剔除了 %d 处白名单外的臆造图片引用", len(removed))
+            # 配套的"图片说明：…"行（可能在图片前或后）只为解释图片而存在，图都没了就没必要保留；
+            # 用户也明确要求只贴图不写说明。按整行删，不限定紧邻被删图片（说明行位置多变）。
+            kept_lines = [
+                line for line in cleaned.splitlines()
+                if not re.match(r"^\s*(?:[-*]\s*)?图片说明\s*[:：]", line)
+            ]
+            cleaned = "\n".join(kept_lines)
+            # 行内删除后会留下连续空行，收敛到最多一个空行。
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned
+
     def _step_4_write_history(self, state: QueryGraphState, image_urls=None) -> QueryGraphState:
         """
         阶段四：把本轮答案写入 MongoDB history。
@@ -384,6 +443,8 @@ class NodeAnswerOutput(NodeBase):
 
 if __name__ == "__main__":
 
+    # 日志只由进程入口配置，手动跑本脚本时显式挂一次控制台 handler。
+    configure_logging()
     logger.info("开始测试: 答案生成节点")
 
     # 1. 构造模拟数据

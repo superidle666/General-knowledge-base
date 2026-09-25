@@ -19,7 +19,7 @@ from processor.query_processor.retrieval_common import (
     resolve_output_fields,
 )
 from processor.query_processor.state import QueryGraphState
-from tool.logger import logger
+from tool.logger import configure_logging, logger
 from utils.embedding_utils import generate_embeddings
 from utils.json_format_utils import serialize_json
 from utils.llm_utils import get_llm_client
@@ -192,6 +192,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
 
 if __name__ == "__main__":
 
+    # 日志只由进程入口配置，手动跑本脚本时显式挂一次控制台 handler。
+    configure_logging()
     init_state = {
         "rewritten_query": "关于brother HAK180烫金机，如何调节转印温度？",
         "library_id": 1,  # 本地实际知识库 ID，手工验证时按库修改

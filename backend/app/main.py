@@ -18,12 +18,16 @@ from backend.app.core.config import settings
 from backend.app.core.permissions import sync_permission_registry
 from backend.app.core.system_settings import sync_system_settings
 from backend.app.db.session import SessionLocal
+from tool.logger import configure_logging, logger
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """启动时同步代码注册的权限定义到数据库。"""
+    """启动时配置日志并同步代码注册的权限定义到数据库。"""
 
+    # 日志由进程入口显式配置（幂等）；库模块导入期不再改动根日志器。
+    # uvicorn 默认只给自己的 logger 挂 handler、不动 root，不配则本项目 INFO 会静默丢弃。
+    configure_logging()
     if not settings.jwt_secret:
         raise RuntimeError("JWT_SECRET must be configured before starting the API")
     if not settings.settings_encryption_key:
@@ -31,6 +35,7 @@ async def lifespan(_: FastAPI):
     async with SessionLocal() as session:
         await sync_permission_registry(session)
         await sync_system_settings(session)
+    logger.info("API 启动完成：%s", settings.app_name)
     yield
 
 app = FastAPI(

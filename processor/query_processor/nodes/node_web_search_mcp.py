@@ -13,7 +13,7 @@ from agents.mcp import MCPServerStreamableHttp
 from config.bailian_mcp_config import mcp_config
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
-from tool.logger import logger
+from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
 
 # 单次联网搜索的总预算：SDK 自带 timeout 只管单个请求，不带总超时会导致“重试3次 x 10s”拖住整个回答
@@ -117,6 +117,8 @@ class NodeWebSearchMcp(NodeBase):
 
 if __name__ == "__main__":
 
+    # 日志只由进程入口配置，手动跑本脚本时显式挂一次控制台 handler。
+    configure_logging()
     init_state = {
         "rewritten_query": "今天北京天气怎么样"
     }

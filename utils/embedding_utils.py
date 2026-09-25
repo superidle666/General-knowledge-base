@@ -9,9 +9,9 @@
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 
 from config.embedding_config import embedding_config
-from processor.import_processor.base import setup_logging
 
-setup_logging()
+# 此处曾在模块导入期调用 setup_logging()：任何 import 本文件的进程（包括问答 API）
+# 都会被顺手重置根日志器，还让 utils 反向依赖了 processor.*。日志配置只由进程入口做。
 
 # 模型单例对象，避免重复初始化
 _bge_m3_ef = None

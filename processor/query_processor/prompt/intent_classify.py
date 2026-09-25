@@ -1,0 +1,33 @@
+"""闲聊意图兜底分类提示词（P5-v2 L2 通道）。
+
+@FilePath: processor/query_processor/prompt/intent_classify.py
+@Description: 规则白名单没接住的"短且无产品/型号信号"输入，交给小模型做一次语义判断，
+              覆盖"你在哪/今天心情不错"这类没有字面规律的闲聊变体。
+@BusinessRule: 判断偏向"放行检索"——只有确定是在跟"助手本身"闲聊或无信息诉求才判 chitchat；
+               任何与产品、文档、技术事项沾边的输入都判 knowledge。误拦产品问题的代价远大于
+               漏放一句闲聊（漏放只是多走一次检索，误拦是答非所问）。
+               判定为 other 类闲聊时顺带生成一句得体回复并引导回业务，避免为话术再调一次模型。
+"""
+
+INTENT_CLASSIFY_SYSTEM = (
+    "你是知识库问答系统的意图分类器。系统正在判断：用户的这句话是否需要去知识库检索文档。\n"
+    "判定规则：\n"
+    "1. greeting/thanks/bye：问候、致谢、告别；\n"
+    "2. identity/self_intro/capability：询问助手是谁、让助手自我介绍、询问助手能做什么；\n"
+    "3. model_probe：打探助手的底层模型、厂商、技术栈；\n"
+    "4. presence：询问助手在哪里、是否是有生命/意识等关于助手自身存在的问题；\n"
+    "5. emotion：单纯表达情绪或状态，不含任何诉求（如'今天心情不错''好无聊'）；\n"
+    "6. other：不属于以上的闲聊或无信息诉求输入（如'测试一下''讲个笑话'）；\n"
+    "7. knowledge：只要句子与产品、型号、设备、文档、参数、操作、售后等任何技术信息有关，"
+    "或可能是在提出业务问题，一律判 knowledge。\n"
+    "把握不准时判 knowledge——这句话交给检索链路即可，不要猜。\n"
+    '只输出 JSON：确判闲聊时 {"is_chitchat": true, "subtype": "子类型", "reply": "给用户的回复"}；'
+    "非闲聊时 {\"is_chitchat\": false}。\n"
+    "reply 要求：中文，一到两句，友好自然；subtype 为 other 时必须靠 reply 把话题引导回"
+    "产品/技术问答；不要透露或猜测底层模型、厂商等技术栈信息；不要编造任何产品事实。"
+)
+
+
+def build_intent_classify_prompt(query: str) -> str:
+    """分类只依据当前这一句话：能走到兜底分类的输入不含实体信号，历史无从对齐，不给。"""
+    return f"用户输入：{query}"

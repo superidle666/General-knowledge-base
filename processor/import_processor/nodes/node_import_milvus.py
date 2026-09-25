@@ -32,11 +32,15 @@ class NodeImportMilvus(BaseNode):
         self._collection_name = collection_name or milvus_config.document_chunks_v2_collection
 
     def process(self, state: ImportGraphState) -> ImportGraphState:
-        """Validate chunks, replace the current document's old vectors, then insert new vectors."""
+        """Insert the new chunk batch first, then clean up the document's previous vectors."""
         chunks, vector_dimension, identity = self._validate_input(state)
         client = self._prepare_collection(vector_dimension)
-        self._delete_document_chunks(client, identity)
-        state["chunks"] = self._insert_chunks(client, chunks, identity)
+        # 先插后删：此前的先删后插一旦 insert 失败，旧向量已没了、新向量没进来，
+        # MySQL 仍是 ready，该文档从检索里隐身——用户看到的永远是"知识库无相关内容"。
+        # 插入失败直接上抛，旧数据原封不动，重试期间检索照常命中上一批切片。
+        inserted_chunks = self._insert_chunks(client, chunks, identity)
+        state["chunks"] = inserted_chunks
+        self._delete_superseded_document_chunks(client, identity, inserted_chunks)
         return state
 
     def _validate_input(
@@ -169,18 +173,65 @@ class NodeImportMilvus(BaseNode):
         )
         self.logger.info("Milvus v2 collection created: %s", self._collection_name)
 
-    def _delete_document_chunks(self, client: Any, identity: Tuple[int, int, int]) -> None:
-        """Delete only the old chunks of the current knowledge-base document."""
+    def _delete_superseded_document_chunks(
+        self,
+        client: Any,
+        identity: Tuple[int, int, int],
+        inserted_chunks: List[Dict[str, Any]],
+    ) -> None:
+        """Delete the document's pre-existing vectors once the new batch is safely inserted.
+
+        定位"本批次之前的全部切片"用 autoID 下界，而不是 document_version：
+        Document.version 全仓库没有任何递增写入（重试导入、恢复过期任务都复用同一
+        版本号），按 document_version != current 清理会让同一文档的新旧两份切片永久并存。
+        Milvus 的 autoID 按号段从全局计数器申领，后写入的号段更大，所以
+        chunk_id < min(本批主键) 恰好等于"这次插入之前该文档的全部切片"。
+        即使号段分配不单调，最坏也只是旧切片残留（重复召回），不会误删新数据。
+
+        清理失败只告警不回滚：新数据已落库，因删不掉旧数据而连坐成功导入不值得。
+        """
         knowledge_base_id, document_id, _ = identity
+        batch_lower_bound = self._min_chunk_id(inserted_chunks)
+        if batch_lower_bound is None:
+            self.logger.warning(
+                "Milvus v2 superseded-chunk cleanup skipped (no numeric chunk_id returned, stale duplicates may remain): knowledge_base_id=%s document_id=%s",
+                knowledge_base_id,
+                document_id,
+            )
+            return
         filter_expression = (
-            f"knowledge_base_id == {knowledge_base_id} and document_id == {document_id}"
+            f"knowledge_base_id == {knowledge_base_id}"
+            f" and document_id == {document_id}"
+            f" and chunk_id < {batch_lower_bound}"
         )
-        client.delete(collection_name=self._collection_name, filter=filter_expression)
+        try:
+            client.delete(collection_name=self._collection_name, filter=filter_expression)
+        except Exception as error:
+            self.logger.warning(
+                "Milvus v2 superseded-chunk cleanup failed (current batch is intact): knowledge_base_id=%s document_id=%s filter=%s error=%s",
+                knowledge_base_id,
+                document_id,
+                filter_expression,
+                error,
+            )
+            return
         self.logger.info(
-            "Milvus v2 document cleanup completed: knowledge_base_id=%s document_id=%s",
+            "Milvus v2 superseded-chunk cleanup completed: knowledge_base_id=%s document_id=%s filter=%s",
             knowledge_base_id,
             document_id,
+            filter_expression,
         )
+
+    @staticmethod
+    def _min_chunk_id(chunks: List[Dict[str, Any]]) -> int | None:
+        """Return the smallest numeric Milvus primary key of this batch, or None."""
+        chunk_ids: list[int] = []
+        for chunk in chunks:
+            try:
+                chunk_ids.append(int(str(chunk.get("chunk_id", ""))))
+            except (TypeError, ValueError):
+                continue
+        return min(chunk_ids) if chunk_ids else None
 
     def _insert_chunks(
         self,
@@ -188,7 +239,11 @@ class NodeImportMilvus(BaseNode):
         chunks: List[Dict[str, Any]],
         identity: Tuple[int, int, int],
     ) -> List[Dict[str, Any]]:
-        """Insert whitelisted v2 fields and copy generated vector IDs back to chunks."""
+        """Insert whitelisted v2 fields and copy generated vector IDs back to chunks.
+
+        插入是"先插后删"链路里风险最高的一步：失败直接上抛让任务重试，此时旧版本
+        向量尚未删除，检索不受影响；不再需要删除侧补偿。
+        """
         collection_fields = self._get_collection_field_names(client)
         data_to_insert = [
             self._build_insert_row(chunk, index, identity)

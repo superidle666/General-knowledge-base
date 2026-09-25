@@ -35,6 +35,7 @@ class QueryGraphState(TypedDict, total=False):
     rrf_chunks: list  # RRF 融合排序后的切片
     reranked_docs: list  # 重排序后的最终 Top-K 文档
     rerank_failed: bool  # 重排序服务是否失败并回退到原始召回
+    embedding_search_failed: bool  # 本地主路检索是否故障（故障≠零命中：Milvus 异常时该路置空并留痕，不伪装成“没查到”）
     hyde_failed: bool  # HyDE 链路是否失败（失败时该路召回为空，不阻断主链路）
     web_search_failed: bool  # 联网检索是否失败（失败时仅用本地结果继续回答）
     sources: list  # 面向用户端的来源列表
@@ -46,7 +47,13 @@ class QueryGraphState(TypedDict, total=False):
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
+    intent: str  # 意图标签：chitchat=命中闲聊意图闸（跳过检索、走静态话术）；其余为正常知识问答
     rewritten_query: str  # 改写后的问题
     history: list  # 历史对话记录
     is_stream: bool  # 是否流式输出
     persist_history: bool  # 是否由工作流写入 Mongo 历史（新 API 由接口统一保存）
+
+    # 实体识别（检索侧词表对齐）
+    # 模式由接口按知识库注入；required 库才对齐，disabled 库整段跳过保证零回归。
+    entity_recognition_mode: str  # 该库实体识别模式：disabled / required
+    entity_vocabulary: list  # required 库的实体词表 [{"name": str, "aliases": [str]}]，由接口异步载入并注入

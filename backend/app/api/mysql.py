@@ -715,7 +715,11 @@ async def upload_document(
         "chunking_config": library.chunking_config,
     }
     for filename, file, raw, file_hash in prepared_files:
-        stored = directory / f"{uuid4().hex}_{filename}"
+        # 命名规则：原始文件名在前、uuid 追加在后缀之前（如 手册_a1b2....pdf）。
+        # 此前 uuid 前置会让 storage/processed 的解析目录和 MinIO 图片目录以一串
+        # 无意义字符开头；全链路只通过 storage_key 定位文件，不解析文件名，改动安全。
+        original = Path(filename)
+        stored = directory / f"{original.stem}_{uuid4().hex}{original.suffix}"
         stored.write_bytes(raw)
         document = Document(library_id=library_id, title=Path(filename).stem or filename, original_filename=filename, storage_key=stored.as_posix(), mime_type=file.content_type, file_size=len(raw), file_hash=file_hash, uploaded_by=current_user.id)
         session.add(document)

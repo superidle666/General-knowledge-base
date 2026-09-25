@@ -98,29 +98,28 @@ def hybrid_search(client, collection_name, reqs, ranker_weights=(0.5, 0.5), norm
     :param limit: 混合搜索最终返回结果数量，默认5
     :param output_fields: 需要返回的字段列表，默认返回item_name
     :param search_params: 搜索参数，如ef/topk等，默认None
-    :return: 混合搜索结果列表，搜索失败返回None
+    :return: 混合搜索结果列表；正常零命中返回空结果结构
+    :raises: 底层调用异常原样上抛。连接失败、filter 解析错误、维度不匹配这些
+        基础设施故障必须由调用方显式处理；在工具层吞掉再返回 None，上层归一化后
+        就成了“零命中”，故障被彻底伪装成“知识库没查到”。
     """
-    try:
-        # 初始化加权排名器：按权重融合稠密/稀疏向量的搜索结果
-        # norm_score=True：先将两个向量评分归一化到0~1区间，再加权计算，避免一个得分特别大、另一个特别小导致权重失效。
-        # 版本：V2.4
-        rerank = WeightedRanker(ranker_weights[0], ranker_weights[1], norm_score=norm_score)
-        # 默认返回字段：文档标识字段
-        if output_fields is None:
-            output_fields = ["item_name"]
+    # 初始化加权排名器：按权重融合稠密/稀疏向量的搜索结果
+    # norm_score=True：先将两个向量评分归一化到0~1区间，再加权计算，避免一个得分特别大、另一个特别小导致权重失效。
+    # 版本：V2.4
+    rerank = WeightedRanker(ranker_weights[0], ranker_weights[1], norm_score=norm_score)
+    # 默认返回字段：文档标识字段
+    if output_fields is None:
+        output_fields = ["item_name"]
 
-        # 执行混合搜索：融合稠密+稀疏向量结果，按权重重新排序
-        res = client.hybrid_search(
-            collection_name=collection_name,
-            reqs=reqs,
-            ranker=rerank,
-            limit=limit,
-            output_fields=output_fields,
-            search_params=search_params
-        )
+    # 执行混合搜索：融合稠密+稀疏向量结果，按权重重新排序
+    res = client.hybrid_search(
+        collection_name=collection_name,
+        reqs=reqs,
+        ranker=rerank,
+        limit=limit,
+        output_fields=output_fields,
+        search_params=search_params
+    )
 
-        logger.info(f"Milvus混合搜索完成，集合[{collection_name}]共检索到{len(res[0])}条结果")
-        return res
-    except Exception as e:
-        logger.error(f"Milvus混合搜索执行失败，集合[{collection_name}]：{str(e)}", exc_info=True)
-        return None
+    logger.info(f"Milvus混合搜索完成，集合[{collection_name}]共检索到{len(res[0])}条结果")
+    return res

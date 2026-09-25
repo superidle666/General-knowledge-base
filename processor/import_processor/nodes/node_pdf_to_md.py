@@ -22,6 +22,15 @@ from processor.import_processor.exceptions import FileProcessingError, StateFiel
 from processor.import_processor.state import ImportGraphState
 
 
+def _timeout(read_seconds: int) -> tuple[int, int]:
+    """生成统一的 (连接, 读取) 超时对。
+
+    三处外部调用（取链接/上传/下载ZIP）不设超时会把导入线程永久挂死：
+    心跳是独立 asyncio 任务、仍在续租，过期恢复永不触发，唯一 Worker 整体卡死。
+    """
+    return (mineru_config.connect_timeout_seconds, read_seconds)
+
+
 class NodePDFToMD(BaseNode):
     """
     PDF 转 Markdown 节点：PDF结构化解析
@@ -109,11 +118,11 @@ class NodePDFToMD(BaseNode):
             "files": [
                 {"name": pdf_path_obj.name}
             ],
-            "model_version": "vlm"
+            "model_version": mineru_config.model_version
         }
 
         # 获取上传url和任务的batch_id
-        response = requests.post(url, headers=header, json=data)
+        response = requests.post(url, headers=header, json=data, timeout=_timeout(mineru_config.read_timeout_seconds))
 
         # 对响应结果进行校验
         # 先校验http状态
@@ -131,7 +140,7 @@ class NodePDFToMD(BaseNode):
 
         # 3、文件上传
         with open(pdf_path_obj, "rb") as f:
-            res_upload = requests.put(signed_url, data=f)
+            res_upload = requests.put(signed_url, data=f, timeout=_timeout(mineru_config.read_timeout_seconds))
             if res_upload.status_code != 200:
                 raise PdfConversionError(f"文件上传失败：状态码：{res_upload.status_code}，响应结果：{res_upload}")
 
@@ -141,8 +150,8 @@ class NodePDFToMD(BaseNode):
         poll_url = f"{mineru_config.base_url}/extract-results/batch/{batch_id}"
 
         start_time = time.time()  # 记录开始时间
-        timeout_seconds = 600  # 最大超时时间
-        poll_interval = 3  # 轮询间隔时间
+        timeout_seconds = mineru_config.poll_total_timeout_seconds  # 轮询最长总时长
+        poll_interval = mineru_config.poll_interval_seconds  # 轮询间隔时间
         self.logger.info(f"【任务轮询】最大超时：{timeout_seconds}s，batch_id：{batch_id}")
 
         # 根据batch_id轮询任务状态直到成功"done"
@@ -152,9 +161,9 @@ class NodePDFToMD(BaseNode):
             if elapsed_time > timeout_seconds:
                 raise TimeoutError(f"【任务轮询】超时！任务处理超{timeout_seconds}秒，batch_id：{batch_id}")
 
-            # 发起轮询请求，短超时10秒，异常则重试
+            # 发起轮询请求，单次短超时，异常则重试
             try:
-                res_poll = requests.get(url=poll_url, headers=header, timeout=10)
+                res_poll = requests.get(url=poll_url, headers=header, timeout=_timeout(mineru_config.poll_read_timeout_seconds))
             except Exception as e:
                 self.logger.warning(f"【任务轮询】网络请求异常，{poll_interval}秒后重试：{str(e)}，bactch_id：{batch_id}")
                 time.sleep(poll_interval)
@@ -202,18 +211,20 @@ class NodePDFToMD(BaseNode):
        异常：RuntimeError(下载失败)、FileNotFoundError(无MD文件)
        """
 
-        # 1、下载ZIP包
+        # 1、下载ZIP包（流式：大文件整块进内存既爆内存，也容易触发读取超时）
         self.logger.info(f"【ZIP下载】开始下载ZIP包：{zip_url} ...")
-        response = requests.get(zip_url)
+        response = requests.get(zip_url, stream=True, timeout=_timeout(mineru_config.zip_read_timeout_seconds))
 
         # 对响应结果进行校验
         if response.status_code != 200:
             raise RuntimeError(f"【ZIP下载】ZIP包下载失败：状态码：{response.status_code}，响应结果：{response}")
 
-        # 拼接ZIP包保存路径并保存
+        # 拼接ZIP包保存路径并分块写盘
         zip_save_path = output_dir_obj / f"{pdf_stem}_result.zip"
         with open(zip_save_path, "wb") as f:
-            f.write(response.content)
+            for chunk in response.iter_content(chunk_size=256 * 1024):
+                if chunk:
+                    f.write(chunk)
         self.logger.info(f"【ZIP下载】ZIP包下载成功：保存路径：{zip_save_path}")
 
         # 2. 如果目标文件夹已存在，先删除（确保环境干净）

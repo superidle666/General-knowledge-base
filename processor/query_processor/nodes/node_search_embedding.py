@@ -58,14 +58,26 @@ class NodeSearchEmbedding(NodeBase):
             expr=expression,
             limit=search_limit,
         )
-        result = hybrid_search(
-            client=client,
-            collection_name=collection_name,
-            reqs=requests,
-            ranker_weights=HYBRID_RANKER_WEIGHTS,
-            limit=search_limit,
-            output_fields=output_fields,
-        )
+        try:
+            result = hybrid_search(
+                client=client,
+                collection_name=collection_name,
+                reqs=requests,
+                ranker_weights=HYBRID_RANKER_WEIGHTS,
+                limit=search_limit,
+                output_fields=output_fields,
+            )
+        except Exception as error:
+            # 检索故障 ≠ 零命中：Milvus 不可用/filter 解析失败必须留下可排查的现场并置
+            # 失败标记。本路降级为空召回（有多少资料答多少），但不能伪装成“没查到”。
+            state["embedding_search_failed"] = True
+            state["embedding_chunks"] = []
+            logger.error(
+                "知识库 %s 本地混合检索故障，本路召回置空：collection=%s filter=%s dense_dim=%s 错误=%s",
+                library_id, collection_name, expression, len(dense_vector), error, exc_info=True,
+            )
+            return state
+        state["embedding_search_failed"] = False
         state["embedding_chunks"] = normalize_hits(result)
         logger.info("知识库 %s 本地检索完成，命中 %s 个 Chunk", library_id, len(state["embedding_chunks"]))
         return state

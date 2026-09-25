@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
-from tool.logger import logger
+from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
 from utils.reranker_http_utils import rerank_documents
 
@@ -162,6 +162,8 @@ class NodeRerank(NodeBase):
         return ranked_docs[:cutoff_pos]
 if __name__ == "__main__":
 
+    # 日志只由进程入口配置，手动跑本脚本时显式挂一次控制台 handler。
+    configure_logging()
     mock_state = {
         "rewritten_query": "怎么测这块主板的短路问题？",
         "rrf_chunks": [

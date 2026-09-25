@@ -25,7 +25,7 @@ from backend.app.api.schemas import (
     QuerySourceOut,
 )
 from backend.app.core.auth import AuthenticatedUser, get_current_user, get_optional_current_user
-from backend.app.db.models import Document, DocumentChunk, Library
+from backend.app.db.models import Document, DocumentChunk, Entity, Library
 from backend.app.db.session import get_db
 from processor.query_processor.main_graph import KBQueryWorkflow
 from utils.sse_utils import SSEEvent, create_sse_queue, get_sse_queue, push_to_session, remove_sse_queue
@@ -77,6 +77,39 @@ async def _get_active_library(session: AsyncSession, library_id: int) -> Library
     if library.status != "active":
         raise HTTPException(400, "知识库已停用，暂不支持查询")
     return library
+
+
+def _entity_vocab_payload(rows: list[tuple[str, list[str] | None]]) -> list[dict]:
+    """把 (实体名, 别名列表) 行转成检索对齐用的紧凑词表；名与别名去空白、丢空串。"""
+    vocabulary: list[dict] = []
+    for name, aliases in rows:
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            continue
+        clean_aliases = [str(alias).strip() for alias in (aliases or []) if str(alias).strip()]
+        vocabulary.append({"name": clean_name, "aliases": clean_aliases})
+    return vocabulary
+
+
+async def _load_entity_vocabulary(session: AsyncSession, library_id: int, library: Library) -> list[dict]:
+    """required 库载入本库实体词表供查询侧对齐；只取就绪且未删除文档，与可召回切片保持一致。
+
+    词表由异步接口注入 state，而不是在同步检索图里读库：查询图跑在线程池且 MySQL 只有异步会话。
+    """
+    if str(library.entity_recognition_mode or "disabled") != "required":
+        return []
+    rows = (
+        await session.execute(
+            select(Entity.name, Entity.aliases)
+            .join(Document, Document.id == Entity.document_id)
+            .where(
+                Entity.library_id == library_id,
+                Document.status == "ready",
+                Document.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    return _entity_vocab_payload([(row[0], row[1]) for row in rows])
 
 
 def _web_source_out(source: dict) -> QuerySourceOut:
@@ -343,6 +376,7 @@ async def query_knowledge_base(
     """查询单个知识库；当前阶段不执行成员或可见范围权限过滤。"""
     library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
+    entity_vocabulary = await _load_entity_vocabulary(session, payload.library_id, library)
     try:
         workflow = KBQueryWorkflow()
         # 工作流内部是同步阻塞调用（BGE-M3 编码、Milvus、LLM，合计可达数十秒），
@@ -357,6 +391,8 @@ async def query_knowledge_base(
             "top_k": payload.top_k,
             "use_hyde": bool(library.use_hyde),
             "use_web_search": payload.use_web_search,
+            "entity_recognition_mode": str(library.entity_recognition_mode or "disabled"),
+            "entity_vocabulary": entity_vocabulary,
             "is_stream": False,
             "persist_history": False,
         })
@@ -391,6 +427,7 @@ async def stream_query_knowledge_base(
     """以 SSE 增量返回知识库回答；客户端可通过 fetch 请求携带认证头。"""
     library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
+    entity_vocabulary = await _load_entity_vocabulary(session, payload.library_id, library)
     stream_id = f"query-stream-{uuid.uuid4().hex}"
     create_sse_queue(stream_id)
 
@@ -404,6 +441,8 @@ async def stream_query_knowledge_base(
                 "top_k": payload.top_k,
                 "use_hyde": bool(library.use_hyde),
                 "use_web_search": payload.use_web_search,
+                "entity_recognition_mode": str(library.entity_recognition_mode or "disabled"),
+                "entity_vocabulary": entity_vocabulary,
                 "is_stream": True,
                 "persist_history": False,
             })

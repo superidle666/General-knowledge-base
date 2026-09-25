@@ -9,7 +9,7 @@ from typing import List, Dict, Any, Tuple
 
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
-from tool.logger import logger
+from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
 
 
@@ -93,6 +93,8 @@ class NodeRrf(NodeBase):
 
 if __name__ == '__main__':
 
+    # 日志只由进程入口配置，手动跑本脚本时显式挂一次控制台 handler。
+    configure_logging()
     # 模拟两路检索结果
     mock_state = {
         "embedding_chunks": [
