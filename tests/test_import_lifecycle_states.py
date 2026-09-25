@@ -19,8 +19,10 @@ from graph_introspection import (
 )
 
 # 变量名 -> 归属对象。导入任务在不同文件里叫 task 或 import_task，文档对象叫 document。
-IMPORT_TASK_OWNERS = {"task", "import_task"}
-DOCUMENT_OWNERS = {"document"}
+# 带上模型名是因为领取已改成一条条件 UPDATE（`update(ImportTask).values(status=...)`）：
+# 写入落进 SQL 后只有模型名能认得出它写的是哪张表，不补上守卫就会当这个写入点不存在。
+IMPORT_TASK_OWNERS = {"task", "import_task", "ImportTask"}
+DOCUMENT_OWNERS = {"document", "Document"}
 
 # 任务进入后不再被 Worker 重新领取的状态。
 TERMINAL_TASK_STATUSES = {"completed", "failed", "cancelled"}
@@ -69,6 +71,24 @@ def test_document_status_values_stay_in_vocabulary() -> None:
     assert not outside, "以下文档状态不在 kb_document 生命周期内：" + "; ".join(
         f"{status} <- {places}" for status, places in sorted(outside.items())
     )
+
+
+def test_sql_side_status_write_counts_as_a_write_point() -> None:
+    """领取写在实际落在 SQL 侧（update(ImportTask).values(status=...)），守卫必须认得它。
+
+    这不是为了让用例通过而放宽断言：P1-6 把领取从“读—判—写”改成一条条件 UPDATE 后，
+    `processing` 不再以 ORM 赋值的形式出现，只认属性赋值的守卫会误报“这个状态没人写”。
+    owners 只给模型名可以把检测面限定在 SQL 写入这一路（属性赋值那一路要的是变量名）。
+    """
+    written = literal_assignments([IMPORT_WORKER], "status", {"ImportTask"})
+    assert written.get("processing"), "领取任务的那条条件 UPDATE 没被识别成写入点"
+
+
+def test_plain_values_call_is_not_mistaken_for_a_write(tmp_path) -> None:
+    """只有链上真有 update/insert 才算写入，普通 `dict.values(...)` / `row.values(...)` 不能认。"""
+    source = tmp_path / "not_a_writer.py"
+    source.write_text('payload.values(status="processing")\nrow.values(status="ready")\n', encoding="utf-8")
+    assert literal_assignments([source], "status", {"ImportTask", "Document"}) == {}
 
 
 def test_worker_progress_map_covers_every_import_node() -> None:

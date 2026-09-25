@@ -33,25 +33,62 @@ def registered_node_names(main_graph: Path) -> set[str]:
     return names
 
 
+def _dml_values_model(node: ast.Call) -> str | None:
+    """从 `update(Model).where(...).values(...)` / `insert(Model).values(...)` 取出被写的模型名。
+
+    只认得确定是 DML 语句的链式调用（链上必须有 update/insert），否则 `some_dict.values()`
+    这类普通调用也会被当成写入点。
+    """
+    current: ast.AST | None = node.func.value if isinstance(node.func, ast.Attribute) else None
+    while isinstance(current, ast.Call):
+        func = current.func
+        if isinstance(func, ast.Name) and func.id in {"update", "insert"}:
+            first = current.args[0] if current.args else None
+            return first.id if isinstance(first, ast.Name) else None
+        func = func if isinstance(func, ast.Attribute) else None
+        current = func.value if func is not None else None
+    return None
+
+
 def literal_assignments(paths: list[Path], attribute: str, owners: set[str]) -> dict[str, list[str]]:
-    """收集 `<owner>.<attribute> = "<字面量>"` 形式的赋值，返回 值 -> 出处(文件:行号) 列表。"""
+    """收集某属性被写成字符串字面量的位置，返回 值 -> 出处(文件:行号) 列表。
+
+    覆盖两种写入形态：
+    - ORM 属性赋值：`task.status = "processing"`
+    - SQL 侧写入：`update(ImportTask).values(status="processing")`（条件更新，归属看模型名）
+    第二种必须一起认，否则把写入从 Python 侧挪进 SQL 会让守卫误报“某状态没人写”。
+    """
     found: dict[str, list[str]] = {}
     for path in paths:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
-                continue
-            value = node.value.value
-            if not isinstance(value, str):
-                continue
-            for target in node.targets:
-                if (
-                    isinstance(target, ast.Attribute)
-                    and target.attr == attribute
-                    and isinstance(target.value, ast.Name)
-                    and target.value.id in owners
-                ):
-                    rel = f"{path.relative_to(PROJECT_ROOT).as_posix()}:{node.lineno}"
-                    found.setdefault(value, []).append(rel)
+            values: list[tuple[str, int]] = []
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
+                value = node.value.value
+                if isinstance(value, str):
+                    values = [
+                        (value, node.lineno)
+                        for target in node.targets
+                        if isinstance(target, ast.Attribute)
+                        and target.attr == attribute
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id in owners
+                    ]
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "values"
+                and _dml_values_model(node) in owners
+            ):
+                values = [
+                    (keyword.value.value, node.lineno)
+                    for keyword in node.keywords
+                    if keyword.arg == attribute
+                    and isinstance(keyword.value, ast.Constant)
+                    and isinstance(keyword.value.value, str)
+                ]
+            for value, lineno in values:
+                rel = f"{path.relative_to(PROJECT_ROOT).as_posix()}:{lineno}"
+                found.setdefault(value, []).append(rel)
     return found
 
 

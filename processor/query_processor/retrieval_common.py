@@ -33,6 +33,16 @@ HYBRID_RANKER_WEIGHTS: tuple[float, float] = (0.8, 0.2)
 # 实体名所在的列；旧版集合没有这一列，对它的过滤表达式会让整次检索报错
 ITEM_NAME_FILTER_FIELD = "item_name"
 
+# 检索链路不可缺少的字段：缺任何一个都不能“自适应”掉
+# - chunk_id：normalize_hits 会丢弃没有它的命中（等于整路静默清空），RRF 也靠它去重
+# - content：送给大模型的正文，缺了就是“召回到却答不出”，只能从日志反推
+# - knowledge_base_id：库隔离过滤字段，缺了要么表达式报错，要么跨库
+REQUIRED_OUTPUT_FIELDS: tuple[str, ...] = ("chunk_id", "content", LIBRARY_FILTER_FIELD)
+
+
+class CollectionSchemaError(RuntimeError):
+    """集合结构不符合检索契约：调用方应按“检索故障”降级，而不是当成零命中继续回答。"""
+
 
 def collection_field_names(client: Any, collection_name: str) -> set[str]:
     """读取集合的实际字段名，用于按结构自适应，避免对旧集合写出无效表达式。"""
@@ -52,7 +62,18 @@ def collection_field_names(client: Any, collection_name: str) -> set[str]:
 
 
 def resolve_output_fields(field_names: set[str]) -> list[str]:
-    """只请求集合里真实存在的字段：多要一个不存在的字段就会让整次检索抛错。"""
+    """按集合真实结构裁剪输出字段，并对关键字段做硬校验。
+
+    多要一个不存在的字段就会让整次检索抛错，所以可选字段只能按结构自适应；但
+    “自适应”不等于“缺了也行”：三个关键字段缺失时检索不会报错，只会给出空结果或没有
+    正文的切片，看起来像“知识库没查到”，实际是 schema 漂移（旧集合、迁移跑一半、手工建表）。
+    这里显性报错，让调用方走已有的检索故障降级路并留下现场。
+    """
+    missing = [field for field in REQUIRED_OUTPUT_FIELDS if field not in field_names]
+    if missing:
+        raise CollectionSchemaError(
+            f"检索集合 schema 不兼容，缺少关键字段：{missing}；集合现有字段：{sorted(field_names)}"
+        )
     return [field for field in RETRIEVAL_OUTPUT_FIELDS if field in field_names]
 
 

@@ -9,6 +9,7 @@ from processor.query_processor.base import NodeBase
 from processor.query_processor.chitchat_gate import (
     classify_chitchat_llm,
     detect_chitchat,
+    normalize_for_match,
     reply_for,
     should_ask_llm,
     within_llm_gate_len,
@@ -40,6 +41,10 @@ MIN_SUBSTRING_MATCH_LEN = 3
 # 抽取调用可省，多出的这次分类是纯新增延迟，只在更短的、几乎不可能是业务问题的
 # 输入上才付出。
 CHITCHAT_LLM_GATE_DISABLED_LEN = 8
+# 闲聊 L2 之前的本库词表探测：问题里点名了已收录实体，就是业务问题，不必再花
+# 一次小模型调用去确认“这不是闲聊”。过短的键不参与，否则“Pro”这类碎片会把
+# “你是谁”误判成业务问题送进检索（与实体对齐侧 MIN_SUBSTRING_MATCH_LEN 同源）。
+MIN_VOCAB_PROBE_KEY_LEN = 3
 
 CLARIFY_TEMPLATE = "您是想问以下哪个产品：{candidates}？请补充更明确的型号或产品名。"
 REFUSE_TEMPLATE = "当前知识库未收录与该型号相关的产品文档，请确认型号或改用其它知识库。"
@@ -109,14 +114,45 @@ class NodePrepareQuery(NodeBase):
 
     @staticmethod
     def _gate_allows_intent_llm(state: QueryGraphState, text: str) -> bool:
-        """L2 分级门禁：先过实体护栏；required 库用 12 字宽门禁（命中可省一次抽取调用，
-        净成本≈0）；disabled 库无调用可省，收紧到 8 字，控制纯新增的分类延迟。"""
+        """L2 分级门禁：先过实体护栏，再过本库词表探测；required 库用 12 字宽门禁（命中可省一次抽取
+        调用，净成本≈0）；disabled 库无调用可省，收紧到 8 字，控制纯新增的分类延迟。"""
         if not should_ask_llm(text):
+            return False
+        if NodePrepareQuery._query_names_known_entity(state, text):
             return False
         mode = str(state.get("entity_recognition_mode") or "disabled")
         if mode == "required":
             return True
         return within_llm_gate_len(text, CHITCHAT_LLM_GATE_DISABLED_LEN)
+
+    @staticmethod
+    def _query_names_known_entity(state: QueryGraphState, text: str) -> bool:
+        """零成本本库词表探测：命中规范名或别名就判业务问题，跳过闲聊 L2 分类。
+
+        通用品牌词护栏（contains_entity_signal）认不出自有产品名（如“星辰一号”），
+        而这正是 required 库最坏 +4s 的那段分类延迟要付出的输入。词表由接口在
+        required 库注入（disabled 库拿到空表，探测自然不生效），无需新增任何查库。
+        两侧都走闲聊闸的去标点口径，否则“HAK 180”与“HAK-180”会因写法差异漏判。
+        探测不中只退化成现状（多一次分类），不会把产品问题误拦成闲聊。
+        """
+        vocabulary = state.get("entity_vocabulary")
+        if not isinstance(vocabulary, list):
+            return False
+        normalized_query = normalize_for_match(text)
+        if not normalized_query:
+            return False
+        for entry in vocabulary:
+            if not isinstance(entry, dict):
+                continue
+            aliases = entry.get("aliases")
+            names = [entry.get("name")]
+            if isinstance(aliases, list):
+                names.extend(aliases)
+            for name in names:
+                key = normalize_for_match(name)
+                if len(key) >= MIN_VOCAB_PROBE_KEY_LEN and key in normalized_query:
+                    return True
+        return False
 
     # ------------------------------------------------------------------
     # 一、实体词表对齐：抽取 → 归一化匹配 → 命中过滤 / 候选反问 / 未收录拒答

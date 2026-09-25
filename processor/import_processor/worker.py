@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if __package__ in {None, ""}:
@@ -37,6 +37,12 @@ from utils.import_queue import (
 
 class ImportTaskCancelled(Exception):
     """Raised internally when cancellation is observed during graph execution."""
+
+
+# 领取任务时允许的状态。queued 是正常待办；processing 看着矛盾（不是已经有人在跑了吗），
+# 但它对应一个真实场景：租约到期后 recover_expired_import_tasks 只会重入 Redis 队列，
+# 没人把 MySQL 状态改回 queued——不认它，这类任务就永远卡在 processing 里没人再跑。
+CLAIMABLE_TASK_STATUSES: tuple[str, ...] = ("queued", "processing")
 
 
 class ImportWorker:
@@ -78,44 +84,66 @@ class ImportWorker:
                 if job is None:
                     continue
                 task_id, attempt = job
-                await self.process_job(task_id, attempt)
+                await self.process_job(task_id, attempt, redis_client=client)
         finally:
             if owns_client:
                 await client.aclose()
+
+    def _client(self, redis_client: Any | None = None) -> Any | None:
+        """解析本次操作应使用的 Redis 客户端：显式传入 > 传递下来的运行期客户端 > 注入客户端。
+
+        返回 None 时由 import_queue 自己兜底建连接（仅适用于单独调 process_job 的测试/
+        脚本）；长驻 Worker 路径上必须拿到同一个客户端，否则入队/锁/租约/心跳/ack
+        每次都要重连+AUTH，而 Redis 在虚拟机上、带密码，一个任务能堆出十几次握手。
+        """
+        return redis_client or self.redis_client
 
     def stop(self) -> None:
         """Request graceful shutdown after the current polling cycle."""
         self._stopping = True
 
-    async def process_job(self, task_id: int, attempt: int = 0) -> None:
-        """Load one MySQL task, run the graph, and retry or fail it on error."""
+    async def process_job(
+        self,
+        task_id: int,
+        attempt: int = 0,
+        *,
+        redis_client: Any | None = None,
+    ) -> None:
+        """Load one MySQL task, run the graph, and retry or fail it on error.
+
+        ``redis_client`` 是 ``run_forever`` 已建的长驻连接；不传则回退到构造时注入的
+        客户端（独立测试/脚本路径），两者都没有时才由工具函数逐次新建。
+        """
+        client = self._client(redis_client)
         try:
             state = await self._mark_processing_and_build_state(task_id)
         except Exception as error:
             self.logger.error("导入任务领取失败：任务=%s，错误=%s", task_id, error, exc_info=True)
-            await self._retry_or_fail(task_id, attempt, error)
+            await self._retry_or_fail(task_id, attempt, error, redis_client=client)
             return
         if state is None:
-            await acknowledge_import_task(task_id, redis_client=self.redis_client)
+            await acknowledge_import_task(task_id, redis_client=client)
             return
-        if await is_import_cancelled(task_id, redis_client=self.redis_client):
+        if await is_import_cancelled(task_id, redis_client=client):
             await self._mark_cancelled(task_id)
-            await acknowledge_import_task(task_id, redis_client=self.redis_client)
+            await acknowledge_import_task(task_id, redis_client=client)
             return
-        heartbeat = asyncio.create_task(self._lease_heartbeat(task_id))
+        heartbeat = asyncio.create_task(self._lease_heartbeat(task_id, redis_client=client))
         final_state: dict[str, Any] | None = None
         try:
             loop = asyncio.get_running_loop()
             state["database_event_loop"] = loop
-            final_state = await asyncio.to_thread(self._run_graph_with_progress, state, task_id, loop)
+            final_state = await asyncio.to_thread(
+                self._run_graph_with_progress, state, task_id, loop, client
+            )
         except ImportTaskCancelled:
             await self._mark_cancelled(task_id)
-            await acknowledge_import_task(task_id, redis_client=self.redis_client)
+            await acknowledge_import_task(task_id, redis_client=client)
         except Exception as error:
             self.logger.error("导入任务失败：任务=%s，错误=%s", task_id, error, exc_info=True)
-            await self._retry_or_fail(task_id, attempt, error)
+            await self._retry_or_fail(task_id, attempt, error, redis_client=client)
         else:
-            await acknowledge_import_task(task_id, redis_client=self.redis_client)
+            await acknowledge_import_task(task_id, redis_client=client)
             if self._is_needs_review(final_state):
                 await self._mark_needs_review(task_id, final_state or {})
                 self.logger.info("导入任务转入人工确认实体：任务=%s", task_id)
@@ -125,14 +153,21 @@ class ImportWorker:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
 
-    async def _lease_heartbeat(self, task_id: int) -> None:
+    async def _lease_heartbeat(self, task_id: int, *, redis_client: Any | None = None) -> None:
         """Refresh a task lease periodically while its graph runs."""
+        client = self._client(redis_client)
         interval = max(1, redis_config.visibility_timeout_seconds // 3)
         while True:
             await asyncio.sleep(interval)
-            await refresh_import_lease(task_id, redis_client=self.redis_client)
+            await refresh_import_lease(task_id, redis_client=client)
 
-    def _run_graph_with_progress(self, state: ImportGraphState, task_id: int, loop: asyncio.AbstractEventLoop) -> dict[str, Any]:
+    def _run_graph_with_progress(
+        self,
+        state: ImportGraphState,
+        task_id: int,
+        loop: asyncio.AbstractEventLoop,
+        redis_client: Any | None = None,
+    ) -> dict[str, Any]:
         """Run the synchronous graph stream and synchronously wait for progress callbacks."""
         workflow = self.workflow_factory()
         final_state: dict[str, Any] = dict(state)
@@ -143,8 +178,11 @@ class ImportWorker:
                 if isinstance(node_output, dict):
                     final_state = node_output
             progress = self._progress_for_node(node_name)
+            # 进度回调回到事件循环上执行，复用的是同一个长驻 Redis 客户端。
             callback = asyncio.run_coroutine_threadsafe(
-                self._record_progress_and_check_cancel(task_id, node_name, progress),
+                self._record_progress_and_check_cancel(
+                    task_id, node_name, progress, redis_client=redis_client
+                ),
                 loop,
             )
             try:
@@ -162,9 +200,16 @@ class ImportWorker:
             return False
         return final_state.get("entity_recognition_mode") == "required" and final_state.get("entity_status") in {"uncertain", "none"}
 
-    async def _record_progress_and_check_cancel(self, task_id: int, node_name: str, progress: int) -> None:
+    async def _record_progress_and_check_cancel(
+        self,
+        task_id: int,
+        node_name: str,
+        progress: int,
+        *,
+        redis_client: Any | None = None,
+    ) -> None:
         """Persist the current node and stop before the next node if cancellation was requested."""
-        if await is_import_cancelled(task_id, redis_client=self.redis_client):
+        if await is_import_cancelled(task_id, redis_client=self._client(redis_client)):
             raise ImportTaskCancelled(f"导入任务已取消：task_id={task_id}")
         async with self.session_factory() as session:
             async with session.begin():
@@ -241,13 +286,23 @@ class ImportWorker:
                     task.current_step = "queue_pending"
                     task.error_message = f"Redis 入队失败：{error}"[:65535]
 
-    async def _retry_or_fail(self, task_id: int, attempt: int, error: Exception) -> None:
+    async def _retry_or_fail(
+        self,
+        task_id: int,
+        attempt: int,
+        error: Exception,
+        *,
+        redis_client: Any | None = None,
+    ) -> None:
         """Requeue a failed task until the retry limit, then mark it permanently failed."""
+        client = self._client(redis_client)
         if attempt < redis_config.max_retries:
             await self._mark_retry(task_id, attempt + 1, error)
-            await release_processing_import_task(task_id, redis_client=self.redis_client)
-            client = self.redis_client or create_redis_client()
-            owns_client = self.redis_client is None
+            await release_processing_import_task(task_id, redis_client=client)
+            owns_client = client is None
+            if owns_client:
+                # 兜底：没注入也没传客户端时才临时建一条，用完即关。
+                client = create_redis_client()
             try:
                 await enqueue_import_task(task_id, redis_client=client, attempt=attempt + 1)
             finally:
@@ -255,27 +310,56 @@ class ImportWorker:
                     await client.aclose()
         else:
             await self._mark_failed(task_id, error)
-            await acknowledge_import_task(task_id, redis_client=self.redis_client)
+            await acknowledge_import_task(task_id, redis_client=client)
 
     async def _mark_processing_and_build_state(self, task_id: int) -> ImportGraphState | None:
-        """Atomically claim a queued task and build the graph input from MySQL records."""
+        """原子领取一个待处理任务并从 MySQL 组装图输入。
+
+        领取用一条带状态条件的 UPDATE 完成，而不是“读—判—写”：两个 Worker 同时拿到同一个
+        task_id 时，只有一条 UPDATE 能把它从 queued 改成 processing，另一条 rowcount 为 0，
+        看到 0 就直接放弃。旧写法两边都能读到 queued，于是都认为自己领到了。
+        progress / started_at 也在 SQL 侧算（CASE 与 COALESCE），避开“拿刚读到的旧值参与写”；
+        用 CASE 而不是 GREATEST 是为了不把语句锁在某个方言上。
+
+        这道防线盖的是“同时读到 queued”这个窗口；对于上面那个 processing 重入场景，两边看到
+        的状态都合法、都能过条件检查，要做真互斥得给领取加围栏（fence：领取时写一个凭据，
+        后续每步写入前先校验凭据还是不是自己的），不属本项范围。
+        """
+        now = datetime.now()
         async with self.session_factory() as session:
             async with session.begin():
-                task = await session.get(ImportTask, task_id)
-                if task is None:
-                    self.logger.warning("Import task not found: task_id=%s", task_id)
+                claimed = await session.execute(
+                    update(ImportTask)
+                    .where(
+                        ImportTask.id == task_id,
+                        ImportTask.status.in_(CLAIMABLE_TASK_STATUSES),
+                    )
+                    .values(
+                        status="processing",
+                        current_step="worker_claimed",
+                        progress=case((ImportTask.progress < 1, 1), else_=ImportTask.progress),
+                        started_at=func.coalesce(ImportTask.started_at, now),
+                    )
+                )
+                if not claimed.rowcount:
+                    # 区分“任务不存在”与“已被别的 Worker 或已终结”，前者警告后者常规跳过
+                    existing = await session.get(ImportTask, task_id)
+                    if existing is None:
+                        self.logger.warning("Import task not found: task_id=%s", task_id)
+                    else:
+                        self.logger.info(
+                            "Skip task with non-claimable status: task_id=%s status=%s", task_id, existing.status
+                        )
                     return None
-                if task.status not in {"queued", "processing"}:
-                    self.logger.info("Skip task with terminal status: task_id=%s status=%s", task_id, task.status)
+                task = await session.get(ImportTask, task_id)
+                if task is None:  # 理论上不可达：上面的 UPDATE 已命中这一行
+                    self.logger.warning("Import task vanished after claim: task_id=%s", task_id)
                     return None
                 document = await session.get(Document, task.document_id)
                 library = await session.get(Library, task.library_id)
                 if document is None or library is None:
+                    # 抛异常会回滚整个事务，连上面的领取一起撤销：任务留在 queued 等重试
                     raise ValueError(f"导入任务关联数据不存在：task_id={task_id}")
-                task.status = "processing"
-                task.current_step = "worker_claimed"
-                task.progress = max(task.progress or 0, 1)
-                task.started_at = task.started_at or datetime.now()
                 document.status = "processing"
                 return self._build_state(task, document, library)
 
@@ -293,7 +377,7 @@ class ImportWorker:
             "entity_recognition_mode": library.entity_recognition_mode or "disabled",
             "config_snapshot": task.config_snapshot or {},
             "import_file_path": str(import_file_path),
-            "file_dir": str(ImportWorker._resolve_project_path("storage/processed")),
+            "file_dir": str(ImportWorker._processed_dir(task.id)),
             "file_title": document.title,
         }
         # 人工确认后重跑：把已确认主实体预置进 state，强制识别节点据此跳过模型。
@@ -306,6 +390,18 @@ class ImportWorker:
             state["entity_candidates"] = list(entity_result.get("candidates") or [manual_name])
             state["entity_maybe_series"] = bool(entity_result.get("maybe_series"))
         return state
+
+    @staticmethod
+    def _processed_dir(task_id: int) -> Path:
+        """一次导入一个解析工作目录：storage/processed/{task_id}。
+
+        以前所有任务共用 storage/processed 这一层平铺目录：zip 与解压出的 md/图片
+        目录混在一堆，中间产物没有归属，想按任务清理都不知道该删哪些。上传文件名
+        已带 uuid，因此并不会真的互相 rmtree；隔离目录换来的是生命周期：重试同一
+        任务时整体重置自己的目录，而绝碰不到别的任务。
+        task_id 走 int 归一，避免把外部输入拼进路径。
+        """
+        return ImportWorker._resolve_project_path(f"storage/processed/{int(task_id)}")
 
     @staticmethod
     def _resolve_project_path(value: str) -> Path:

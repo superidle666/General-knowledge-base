@@ -13,7 +13,7 @@ import re
 import time
 from collections import deque
 from pathlib import Path
-from typing import Tuple, List, Deque, Dict
+from typing import Any, Tuple, List, Deque, Dict
 
 from langchain_openai import ChatOpenAI
 from minio import Minio
@@ -26,6 +26,11 @@ from processor.import_processor.exceptions import StateFieldError, FileProcessin
 from processor.import_processor.state import ImportGraphState
 from utils.minio_utils import get_minio_client
 
+# 单次图片摘要请求的超时上限（秒）。原先不传 timeout，走 openai SDK 默认的 600 秒，
+# 再叠上默认重试，一张卡住不响应的图片就能挂住 Worker 将近半小时。这里取 60 秒；
+# SDK 默认重试 2 次未变，因而不健康模型下单张图最坏约 3 × 60 秒。
+VL_REQUEST_TIMEOUT_SECONDS = 60.0
+
 
 class NodeMDImg(BaseNode):
     """
@@ -33,6 +38,11 @@ class NodeMDImg(BaseNode):
     """
 
     name = "node_md_img"
+
+    def __init__(self, **kwargs: Any):
+        """初始化节点；多模态客户端惰性创建，在本任务（节点实例）内复用。"""
+        super().__init__(**kwargs)
+        self._chat_model: ChatOpenAI | None = None
 
     def process(self, state: ImportGraphState):
 
@@ -185,19 +195,18 @@ class NodeMDImg(BaseNode):
         """
         步骤3：批量为待处理图片生成内容摘要，带API速率限制防止触发大模型限流
         :param doc_stem: 文档文件名（不含后缀），作为大模型prompt上下文
-        :param targets: 待处理图片列表，元素为(图片文件名, 图片完整路径, 图片上下文)
-        :param requests_per_minute: 每分钟最大API请求数，默认9次（按大模型限制调整）
+        :param target_images: 待处理图片列表，元素为(图片文件名, 图片完整路径, 图片上下文)
         :return: 图片摘要字典，键：图片文件名，值：图片内容摘要
         """
         summaries = {}
 
-        # 1、外部初始化双端队列，用于API速率限制，跨循环复用
+        # 1、外部初始化双端队列，用于API速率限制，跨循环复用（本任务内生效）
         request_deque = deque()
 
         # 2、循环处理图片
         for img_file, image_path, context in target_images:
-            # 2.1、速率限制
-            self._apply_api_rate_limit(request_deque, max_requests=10)
+            # 2.1、速率限制：上限以配置为准，不在节点里硬编数字
+            self._apply_api_rate_limit(request_deque, max_requests=self.config.requests_per_minute)
 
             # 2.2、调用大模型生成图片摘要
             summaries[img_file] = self._summarize_image(image_path, root_folder=doc_stem, image_content=context)
@@ -241,6 +250,28 @@ class NodeMDImg(BaseNode):
         request_times.append(current_time)
         logging.getLogger().info(f"API请求时间戳已记录，当前{window_seconds}秒窗口内请求数：{len(request_times)}")
 
+    def _get_chat_model(self) -> ChatOpenAI:
+        """
+        取多模态客户端，同一任务内只建一个。
+
+        原来每张图片都新建一次 ChatOpenAI：它的 httpx 连接池从未被复用到，白白多付
+        N-1 次建连与 TLS 握手。
+
+        这里不走 utils.llm_utils.get_llm_client：那个工厂会固定注入
+        extra_body={"enable_thinking": False}（文本模型用），而多模态端点是否接受该
+        参数未经验证——一旦被拒，失败会被下面的 except 吞成“图片描述”，变成没人看见的
+        静默劣化。本项只修建连复用与超时，不动请求体。
+        """
+        if self._chat_model is None:
+            self._chat_model = ChatOpenAI(
+                model=lm_config.vl_model,
+                api_key=lm_config.api_key,
+                base_url=lm_config.base_url,
+                temperature=lm_config.llm_temperature,
+                timeout=VL_REQUEST_TIMEOUT_SECONDS,
+            )
+        return self._chat_model
+
     def _summarize_image(self, image_path: str, root_folder: str, image_content: Tuple[str, str]) -> str:
         """
            调用多模态大模型总结图片内容。
@@ -253,12 +284,7 @@ class NodeMDImg(BaseNode):
         try:
             with open(image_path, "rb") as img_file:
                 base64_image = base64.b64encode(img_file.read()).decode("utf-8")
-            chat_model = ChatOpenAI(
-                model=lm_config.vl_model,
-                api_key=lm_config.api_key,
-                base_url=lm_config.base_url,
-                temperature=lm_config.llm_temperature
-            )
+            chat_model = self._get_chat_model()
             messages = [
                 {
                     "role": "user",

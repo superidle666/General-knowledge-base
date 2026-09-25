@@ -36,8 +36,14 @@ class NodeRrf(NodeBase):
         # 3. 利用RRF的计算公式去获取到所有路查询到的所有chunk对应的score
         rrf_merge_results = self._rrf_merge(rrf_inputs)
 
-        # 4. 获取rrf_chunks（只取文档，不要分数）
-        rrf_chunks = [doc for doc, _ in rrf_merge_results]
+        # 4. 获取rrf_chunks：分数与名次一起落到文档上
+        # 不这么写下游就拿不到融合分（以前算完就在下一步被丢弃），精排失败时只能退回
+        # vector_score 排序；而 rrf_score 只依赖名次，不像向量分那样受集合度量类型
+        # （COSINE/IP）影响，两路召回可以放在同一把尺子下比。
+        rrf_chunks = [
+            {**doc, "rrf_score": round(score, 6), "rrf_rank": rank}
+            for rank, (doc, score) in enumerate(rrf_merge_results, start=1)
+        ]
 
         # 5. 更新state
         state['rrf_chunks'] = rrf_chunks

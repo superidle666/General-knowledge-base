@@ -10,7 +10,6 @@ from processor.query_processor.base import NodeBase
 from processor.query_processor.prompt.search_embedding_hyde import HYDE_PROMPT
 from processor.query_processor.retrieval_common import (
     HYBRID_RANKER_WEIGHTS,
-    LIBRARY_FILTER_FIELD,
     build_item_name_filter,
     build_library_filter,
     collection_field_names,
@@ -156,8 +155,6 @@ class NodeSearchEmbeddingHyde(NodeBase):
             return []
 
         field_names = collection_field_names(client, collection_name)
-        if LIBRARY_FILTER_FIELD not in field_names:
-            raise ValueError(f"检索集合缺少 {LIBRARY_FILTER_FIELD} 字段：{collection_name}")
 
         # 4、构造过滤条件：库隔离必须保留，实体名按集合结构可选附加并做转义
         expr = combine_filters(
@@ -177,6 +174,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
         )
 
         # 6、执行混合向量检索
+        # 输出字段由共享解析器裁剪，它同时对关键字段做硬校验：集合 schema 不兼容时抛
+        # CollectionSchemaError，由 process 的外层降级接住并置 hyde_failed（不能伪装成零命中）。
         logger.info("步骤2: 开始执行 Milvus 混合检索...")
         res = hybrid_search(
             client=client,

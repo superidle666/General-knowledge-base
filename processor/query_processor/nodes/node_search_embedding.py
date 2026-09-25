@@ -6,7 +6,6 @@ from config.milvus_config import milvus_config
 from processor.query_processor.base import NodeBase
 from processor.query_processor.retrieval_common import (
     HYBRID_RANKER_WEIGHTS,
-    LIBRARY_FILTER_FIELD,
     build_item_name_filter,
     build_library_filter,
     collection_field_names,
@@ -44,13 +43,10 @@ class NodeSearchEmbedding(NodeBase):
             state["embedding_chunks"] = []
             return state
         field_names = collection_field_names(client, collection_name)
-        if LIBRARY_FILTER_FIELD not in field_names:
-            raise ValueError(f"检索集合缺少 {LIBRARY_FILTER_FIELD} 字段：{collection_name}")
         expression = combine_filters(
             build_library_filter(library_id),
             build_item_name_filter(state.get("item_names"), field_names),
         )
-        output_fields = resolve_output_fields(field_names)
         search_limit = max(int(state.get("retrieval_top_k") or 20), 10)
         requests = create_hybrid_search_requests(
             dense_vector=dense_vector,
@@ -59,6 +55,9 @@ class NodeSearchEmbedding(NodeBase):
             limit=search_limit,
         )
         try:
+            # 集合结构硬校验放在 try 里：缺关键字段是“检索故障”而不是“没查到”，
+            # 走与连接失败同一条降级路（置失败标记 + 留现场），不让整条问答跟着失败。
+            output_fields = resolve_output_fields(field_names)
             result = hybrid_search(
                 client=client,
                 collection_name=collection_name,

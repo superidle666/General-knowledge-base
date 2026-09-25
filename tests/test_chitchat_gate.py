@@ -6,6 +6,8 @@
    绝不因带'你/能/温度'被误判为闲聊。
 2. 节点集成：驱动 NodePrepareQuery，验证 L1 命中不走 L2、L2 命中预置 answer + intent
    并跳过实体对齐、LLM 异常一律放行；并静态守卫 intent 通道已在 QueryGraphState 声明。
+3. 本库词表探测（P1-3）：点名了库内实体的短问题直接进检索，不再为“确认不是闲聊”
+   付一次小模型调用；探测只作用于 L2，不放宽 L1 规则面。
 
 离线约束：本文件顶部的 autouse fixture 把 classify_chitchat_llm 在 gate 与节点两个
 模块命名空间都 stub 成报错实现，任何用例误触真实 LLM 调用都会直接失败而不是静默联网；
@@ -317,6 +319,90 @@ def test_node_leaves_product_query_to_retrieval() -> None:
     assert state.get("intent") is None  # 未拦截
     assert not state.get("answer")  # 未预置答案，继续检索与生成
     assert state["item_names"] == ["HAK-180"]  # 正常走实体对齐命中
+
+
+# --------------------------------------------------------------------------
+# 四b、本库词表探测（P1-3）：点名了库内实体的短问题不再走 L2 分类
+# --------------------------------------------------------------------------
+
+def _vocab_state(query: str, mode: str = "required", vocabulary: object = ...) -> dict:
+    state = _state(query, mode)
+    state["entity_vocabulary"] = (
+        [{"name": "星辰一号", "aliases": ["XT-1"]}]
+        if vocabulary is ...
+        else vocabulary
+    )
+    return state
+
+
+def test_vocab_probe_skips_l2_for_own_product_name(monkeypatch) -> None:
+    # “星辰一号怎么办”：通用品牌词护栏认不出自有产品名，旧行为是为它多付一次
+    # 小模型分类调用（最坏 4s）；现在词表探测接住，直接进检索链路。
+    node = NodePrepareQuery()
+    calls: dict[str, object] = {"llm": False, "align": False}
+
+    def _spy(_text: str):
+        calls["llm"] = True
+        return None, ""
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node._align_entity = lambda state: calls.__setitem__("align", True)
+    state = node.process(_vocab_state("星辰一号怎么办"))
+    assert calls["llm"] is False, "命中本库词表就不该再问 L2"
+    assert calls["align"] is True
+    assert state.get("intent") is None
+    assert not state.get("answer")
+
+
+def test_vocab_probe_still_calls_l2_for_unknown_entity(monkeypatch) -> None:
+    # 词表里没有的短输入（“今天心情怎么样”）保持原样走 L2，探测不能把门禁关掉。
+    node = NodePrepareQuery()
+    reached = {"llm": False}
+
+    def _spy(_text: str):
+        reached["llm"] = True
+        return None, ""
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node._align_entity = lambda state: None
+    node.process(_vocab_state("今天心情怎么样"))
+    assert reached["llm"] is True
+
+
+def test_vocab_probe_matches_names_aliases_and_spacing() -> None:
+    probe = NodePrepareQuery._query_names_known_entity
+    state = _vocab_state("")
+    assert probe(state, "星辰一号怎么办") is True  # 规范名
+    assert probe(state, "XT-1 报错") is True  # 别名
+    assert probe(state, "xt1报错") is True  # 同一口径去标点/空格：不写连字符也对得上
+    assert probe(state, "星辰 一号 怎么办") is True  # 中间夹空格不能造成漏判
+    assert probe(state, "XT-2 报错") is False  # 表里没有的型号
+    assert probe(state, "") is False
+
+
+def test_vocab_probe_ignores_fragment_keys() -> None:
+    # 过短的键（如 "X1"）不参与探测，否则会把不相关的短句误判成业务问题。
+    probe = NodePrepareQuery._query_names_known_entity
+    state = _vocab_state("", vocabulary=[{"name": "X1", "aliases": []}])
+    assert probe(state, "x1 是谁") is False
+
+
+def test_vocab_probe_is_inert_without_a_vocabulary() -> None:
+    # disabled 库接口侧不载入词表：探测自然不生效，不改变原有的收紧门禁。
+    probe = NodePrepareQuery._query_names_known_entity
+    assert probe(_vocab_state("", vocabulary=[]), "星辰一号怎么办") is False
+    assert probe(_vocab_state("", vocabulary=[{"name": "星辰一号", "aliases": []}]), "星辰一号怎么办") is True
+    assert probe({"entity_vocabulary": "星辰一号"}, "星辰一号怎么办") is False  # 非法形状不报错
+    assert probe({}, "星辰一号怎么办") is False
+
+
+def test_vocab_probe_does_not_loosen_l1() -> None:
+    # 探测只作用于 L2；L1 规则面不变：“星辰一号 你是谁”仍按寒暄接住。
+    node = NodePrepareQuery()
+    node._align_entity = lambda state: None
+    state = node.process(_vocab_state("星辰一号 你是谁"))
+    assert state["intent"] == "chitchat"
+    assert state["answer"] in CHITCHAT_REPLIES["identity"]
 
 
 # --------------------------------------------------------------------------

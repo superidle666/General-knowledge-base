@@ -122,8 +122,8 @@ def test_collection_field_names_reads_both_schema_shapes() -> None:
 
 
 def test_resolve_output_fields_only_keeps_existing_columns() -> None:
-    """请求不存在的字段会让整次检索失败，因此输出字段必须按集合结构裁剪。"""
-    available = {"chunk_id", "content", "item_name"}
+    """请求不存在的字段会让整次检索失败，因此可选输出字段必须按集合结构裁剪。"""
+    available = {"chunk_id", "content", "knowledge_base_id", "item_name"}
     resolved = resolve_output_fields(available)
     assert set(resolved) == available
     assert set(RETRIEVAL_OUTPUT_FIELDS) - available and resolved[0] == "chunk_id"
@@ -156,7 +156,8 @@ def test_hyde_node_targets_v2_collection_only() -> None:
     assert "document_chunks_v2_collection" in text
     assert "chunks_collection" not in text.replace("document_chunks_v2_collection", "")
     # 库隔离条件由共享构造器产生，不可以在节点里再拼一遍字段名
-    assert "LIBRARY_FILTER_FIELD" in text and "build_library_filter" in text
+    # （字段硬校验已收到 resolve_output_fields，节点不该自己判 LIBRARY_FILTER_FIELD）
+    assert "build_library_filter" in text and "resolve_output_fields" in text
     assert '"knowledge_base_id ==' not in text
 
 

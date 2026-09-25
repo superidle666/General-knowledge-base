@@ -23,7 +23,9 @@ import re
 from tool.logger import logger
 
 # 归一化用的标点集合（中英文常见分隔符 + 空白），命中判断按去标点后的整句做子串匹配。
-_PUNCT = "。！？，、；：~～!?,.；:\"'“”‘’（）()【】[]{}<>《》 \t\n"
+# 连字符类单独说明：“HAK-180”与“HAK180”是同一个型号的两种写法，不去掉会
+# 让本库词表探测（normalize_for_match 两侧同一口径）因写法差异漏判。
+_PUNCT = "。！？，、；：~～!?,.；:\"'“”‘’（）()【】[]{}<>《》-—–―＿_ \t\n"
 
 # 短句上限：闲聊普遍很短；超过这个长度大概率是有具体诉求，交给检索。
 _MAX_QUERY_LEN = 16
@@ -83,6 +85,12 @@ _BRAND_TERMS = (
 def _normalize(text: object) -> str:
     """去空白与标点、转小写，用于整句/子串匹配；只保留中英文与数字。"""
     return "".join(ch for ch in str(text or "").strip().lower() if ch not in _PUNCT)
+
+
+def normalize_for_match(text: object) -> str:
+    """归一化的对外入口：外部（节点侧本库词表探测）与内部白名单匹配共用同一口径，
+    避免“去标点”与“只去空白”两套写法互相对齐不上导致探测静默失效。"""
+    return _normalize(text)
 
 
 def contains_entity_signal(text: object) -> bool:
