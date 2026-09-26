@@ -57,7 +57,10 @@ export type UserSource = {
   id: string
   title: string
   type: string
+  // 原始检索相关度（rerank 分转的百分比），仅作详情里的次级参考；降级态为“—”
   score: string
+  // 检索相关性分档（很相关/较相关/参考/参考序），表达相对强弱而非答案置信度
+  relevanceLabel: string
   color: string
   content: string
   documentId: number | null

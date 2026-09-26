@@ -27,7 +27,7 @@ from backend.app.api.schemas import (
 from backend.app.core.auth import AuthenticatedUser, get_current_user, get_optional_current_user
 from backend.app.db.models import Document, DocumentChunk, Entity, Library
 from backend.app.db.session import get_db
-from processor.query_processor.main_graph import KBQueryWorkflow
+from processor.query_processor.main_graph import get_kb_query_workflow
 from utils.sse_utils import SSEEvent, create_sse_queue, get_sse_queue, push_to_session, remove_sse_queue
 from utils.mongo_history_utils import (
     ensure_user_session,
@@ -125,6 +125,7 @@ def _web_source_out(source: dict) -> QuerySourceOut:
         document_title=title or site_name or url or "联网资料",
         content=str(source.get("content") or "").strip(),
         score=score,
+        score_kind=str(source.get("score_kind") or "rerank"),
         source="web",
         url=url,
         site_name=site_name,
@@ -177,6 +178,7 @@ async def _hydrate_sources(
             parent_title=str(metadata.get("parent_title") or "") or None,
             content=chunk.content,
             score=source.get("score"),
+            score_kind=str(source.get("score_kind") or "rerank"),
             source="local",
         ))
     hydrated.sort(
@@ -378,7 +380,8 @@ async def query_knowledge_base(
     session_id, history = await _prepare_session_context(payload, user)
     entity_vocabulary = await _load_entity_vocabulary(session, payload.library_id, library)
     try:
-        workflow = KBQueryWorkflow()
+        # 图是进程内共享的（节点无请求态），每请求只新建 state 字典
+        workflow = get_kb_query_workflow()
         # 工作流内部是同步阻塞调用（BGE-M3 编码、Milvus、LLM，合计可达数十秒），
         # 必须挪到线程池执行：直接在本协程里跑会冻结整个事件循环，
         # 使该请求期间所有其他请求（含 SSE 心跳）都无法响应；
@@ -433,7 +436,7 @@ async def stream_query_knowledge_base(
 
     def run_workflow() -> None:
         try:
-            result = KBQueryWorkflow().run({
+            result = get_kb_query_workflow().run({
                 "library_id": payload.library_id,
                 "original_query": payload.query,
                 "session_id": stream_id,

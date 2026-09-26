@@ -35,11 +35,15 @@ class NodeWebSearchMcp(NodeBase):
 
         返回前统一成 {title, url, snippet, site_name} 结构，由 rerank 节点归入多源文档；
         web_search_failed 会随结果一并置位，便于前端和日志区分“没搜到”和“搜失败”。
+
+        跟其他节点一样返回完整 state（写回而不是新建一个只含两个键的字典）。
         """
         query = str(state.get("rewritten_query") or state.get("original_query") or "").strip()
         if not query:
             logger.info("联网检索跳过：无有效问题")
-            return {"web_search_docs": [], "web_search_failed": False}
+            state["web_search_docs"] = []
+            state["web_search_failed"] = False
+            return state
 
         try:
             result = asyncio.run(asyncio.wait_for(
@@ -49,10 +53,14 @@ class NodeWebSearchMcp(NodeBase):
             docs = self._parse_pages(result)
         except Exception as e:
             logger.error(f"联网检索失败，降级为仅用本地知识库结果继续回答: {e}")
-            return {"web_search_docs": [], "web_search_failed": True}
+            state["web_search_docs"] = []
+            state["web_search_failed"] = True
+            return state
 
         logger.info("联网检索补充 %s 条结果", len(docs))
-        return {"web_search_docs": docs, "web_search_failed": False}
+        state["web_search_docs"] = docs
+        state["web_search_failed"] = False
+        return state
 
     @staticmethod
     def _resolve_count(state: QueryGraphState) -> int:

@@ -7,7 +7,6 @@
 """
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Tuple, Any, List, Dict
 
@@ -21,12 +20,8 @@ from processor.import_processor.base import BaseNode, setup_logging
 from processor.import_processor.content_blocks import ContentBlock, build_content_blocks
 from processor.import_processor.state import ImportGraphState
 
-# --- 配置参数 (Configuration) ---
-# 单个Chunk最大字符长度：超过则触发二次切分（适配大模型上下文窗口）
-DEFAULT_MAX_CONTENT_LENGTH = 2000
-# 短Chunk合并阈值：同父标题的短Chunk会被合并，减少碎片化
-MIN_CONTENT_LENGTH = 500
-
+# 切分阈值只有两个来源：ImportConfig 里的默认值，以及知识库级的 chunking_config（见
+# _get_chunking_config）。这里不再放一份模块常量当第三套口径。
 
 
 class NodeDocumentSplit(BaseNode):
@@ -213,7 +208,6 @@ class NodeDocumentSplit(BaseNode):
             section["file_name"] = file_name
             section["item_name"] = section.get("item_name", state.get("item_name", "")) or ""
             section["entity_recognition_mode"] = state.get("entity_recognition_mode", "disabled")
-            section.setdefault("source_page", section.get("page_number"))
         return sections
 
     @staticmethod
@@ -307,103 +301,6 @@ class NodeDocumentSplit(BaseNode):
 
         self.logger.info(f"步骤1：输入数据加载完成，文件标题：{file_title}")
         return md_content, file_title
-
-    def _step_2_split_by_titles(self, content: str, file_title: str) -> Tuple[List[Dict[str, str]], int, int]:
-        """
-        【步骤2】按Markdown标题初次切分（核心：按#分级切分，跳过代码块内标题）
-        LangChain前置预处理：将整份MD按标题拆分为独立章节，为后续精细化切分做基础
-        :param content: 标准化后的MD完整内容（字符串）
-        :param file_title: 所属文件标题，用于标记章节归属
-        :return: 切分后的章节列表/有效标题数量/原始文本总行数
-        """
-
-        # 1、定义标题正则
-        # 正则匹配Markdown 1-6级标题（核心规则，适配缩进/标准格式）
-        # ^\s*：行首允许0/多个空格/Tab（兼容缩进的标题）
-        # #{1,6}：匹配1-6个#（对应MD1-6级标题）
-        # \s+：#后必须有至少1个空格（区分#是标题还是普通文本）
-        # .+：标题文字至少1个字符（避免空标题）
-        title_pattern = r'\s*#{1,6}\s+.+'
-
-        # 2、初始化需要的数据
-        lines = content.split("\n")
-        sections = []  # 章节列表
-        title_count = 0  # 标题数量
-        current_title = ""  # 当前章节的标题
-        current_lines = []  # 当前标题和下一个标题之间的文本内容
-        in_code_block = False  # 代码块标记：False当前没在代码块中，True当前在代码块中
-
-        # 3、定义内部函数组装sections列表
-        def _flush_section():
-            """内部辅助函数：将当前缓存的章节写入sections，空缓存则跳过"""
-            if not current_lines:
-                return
-            sections.append({
-                "title": current_title,
-                # 每段时间使用 \n换行区分
-                "content": "\n".join(current_lines),
-                "file_title": file_title,
-            })
-
-        # 4、逐行遍历，识别标题和普通行以及代码快
-        for line in lines:
-            stripped_line = line.strip()
-            # 4.1 识别代码块边界 ```、~~~、````、~~~~ 等（至少 3 个连续字符）
-            # 使用正则匹配：行首到行尾只有 ` 或 ~ 字符，且数量>=3
-            code_block_marker_match = re.match(r'^(`{3,}|~{3,})$', stripped_line)
-            if code_block_marker_match:
-                marker = code_block_marker_match.group(1)
-                marker_len = len(marker)  # 获取标记长度
-
-                if not in_code_block:
-                    # 进入代码块，记录开始的标记特征
-                    in_code_block = True
-                    code_block_start_marker = marker
-                elif in_code_block and stripped_line == code_block_start_marker:
-                    # 遇到匹配的结束标记（相同字符且相同长度）
-                    in_code_block = False
-                    code_block_start_marker = None
-
-                current_lines.append(line)
-                continue
-
-            # 4.2 识别标题
-            is_valid_title = (not in_code_block) and re.match(title_pattern, line)
-            if is_valid_title:
-                # 遇到标题现将上一个片段写入sesions，再初始化新的章节
-                _flush_section()
-                current_title = stripped_line
-                current_lines = [current_title]
-                title_count += 1
-                self.logger.info(f"识别标题：{current_title}")
-            else:
-                # 普通行
-                current_lines.append(line)
-
-        _flush_section()
-        self.logger.info(f"文档粗切（按标题切分）完成，共{len(sections)}个章节，标题数量是{title_count}，文本共有{len(lines)}行")
-        return sections, title_count, len(lines)
-
-    def _step_3_handle_no_title(self, content: str, sections: List[Dict[str, str]], title_count: int,
-                                file_title: str) -> List[Dict[str, str]]:
-        """
-        【步骤3】无标题兜底处理
-        功能：若MD中未识别到任何标题，将全文作为一个整体处理，避免后续逻辑异常
-        :param content: 标准化后的MD完整内容
-        :param sections: 步骤2切分后的章节列表
-        :param title_count: 步骤2识别的有效标题数量
-        :param file_title: 所属文件标题
-        :return: 兜底后的章节列表
-        """
-        if title_count == 0:
-            # 无标题情况：替换为单章节，标题为"无标题"
-            self.logger.warning(f"步骤3：未识别到任何MD标题，将全文作为单个章节处理，文件：{file_title}")
-            return [{"title": "无标题",
-                     "content": content,
-                     "file_title": file_title}]
-        # 有标题情况：直接返回步骤2的结果
-        self.logger.debug(f"步骤3：检测到{title_count}个有效标题，无需兜底处理")
-        return sections
 
     def _step_4_refine_chunks(
         self,
@@ -549,78 +446,6 @@ class NodeDocumentSplit(BaseNode):
         append_chunk(pending_parts, pending_blocks)
         self.logger.debug("内容块超长切分完成：%s → 生成%s个子Chunk", title, len(result))
         return result or [section]
-
-    def _split_long_section_legacy(self, section: Dict[str, str], max_content_length: int, chunk_overlap: int) -> List[Dict[str, str]]:
-        """
-        【辅助函数】超长章节二次切分（核心适配LangChain分割器）
-        功能：单个章节内容超限时，按「段落→句子→空格」从粗到细切分，保留语义
-        切分规则：1.先按空行(段落) 2.再按换行 3.最后按中英文标点/空格
-        :param section: 原始章节字典，必须包含content键，可选title/file_title等
-        :return: 切分后的子章节列表，每个子章节带父标题/序号等元信息
-        """
-        # 内容空值兜底：无内容直接返回原章节
-        content = section.get("content", "")
-        # 长度未超限，无需切分，直接返回原章节（列表格式保持统一）
-        if len(content) <= max_content_length:
-            return [section]
-
-        # 提取章节标题，用于组装子Chunk前缀（保留标题上下文）
-        title = section.get("title", "")
-        # 标题前缀：带空行分隔，与正文区分开
-        prefix = f"{title}\n\n" if title else ""
-        # 计算正文可用长度：总长度 - 标题前缀长度（避免标题占满Chunk额度）
-        available_len = max_content_length - len(prefix)
-        # 极端情况：标题长度超过阈值，无法切分，返回原章节
-        if available_len <= 0:
-            self.logger.warning(f"章节标题过长，无法切分：{title[:20]}...")
-            return [section]
-
-        # 清理正文重复标题：避免原章节中正文开头重复标题，导致子Chunk内容冗余
-        body = content
-        if title and body.lstrip().startswith(title):
-            body = body[body.find(title) + len(title):].lstrip()
-
-        # 初始化LangChain递归分割器（核心工具：按优先级分隔符切分，保留语义）
-        # separators：分割符优先级（从粗到细），优先按大语义单元切分，最后才硬拆
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=available_len,  # 正文部分最大长度（已扣除标题）
-            chunk_overlap=0,  # 无重叠：按标题切分后语义完整，无需重叠
-            # 分割符优先级：空行(段落)→换行→中文标点→英文标点→空格，最后硬拆（在 chunk_size 位置强制切断）
-            # 先用第一个分隔符进行切分，切分后如果某个 Chunk 还是超过 chunk_size，则继续用下一个优先级的分隔符切分
-            separators=["\n\n", "\n", "。", "！", "？", "；", ".", "!", "?", ";", " "],
-        )
-
-        # 切分正文并组装子章节（带完整元信息，便于溯源）
-        sub_sections = []
-        block_metadata = {
-            key: section[key]
-            for key in ("title_path", "source_page", "content_block_orders", "content_block_types")
-            if key in section
-        }
-
-        # 遍历切分后的每个文本块，idx 从 1 开始计数
-        for idx, chunk in enumerate(splitter.split_text(body), start=1):
-
-            # 清理空内容：跳过切分后的空字符串
-            text = chunk.strip()
-            if not text:
-                continue
-
-            # 组装子Chunk完整内容 = 标题前缀 + 切分后的正文
-            full_text = (prefix + text).strip()
-
-            # 子章节元信息：保留父级关联，添加序号，便于后续检索/溯源
-            sub_sections.append({
-                "title": f"{title}-{idx}" if title else f"chunk-{idx}",  # 子Chunk标题（带序号）
-                "content": full_text,  # 切分后的完整内容
-                "parent_title": title,  # 父章节标题（用于后续合并）
-                "part": idx,  # 子Chunk序号
-                "file_title": section.get("file_title"),  # 所属文件标题
-                **block_metadata,
-            })
-
-        self.logger.debug(f"超长章节切分完成：{title} → 生成{len(sub_sections)}个子Chunk")
-        return sub_sections
 
     def _merge_short_sections(
         self,

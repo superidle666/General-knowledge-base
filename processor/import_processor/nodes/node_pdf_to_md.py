@@ -66,7 +66,7 @@ class NodePDFToMD(BaseNode):
         步骤1：校验PDF文件路径和输出目录
         核心职责：参数非空校验 | 路径转换 | PDF文件有效性校验 | 输出目录自动创建
         返回：合法的PDF文件Path对象、输出目录Path对象
-        异常：ValueError(参数缺失)、FileNotFoundError(文件无效)
+        异常：StateFieldError（状态字段缺失或类型不对）、FileProcessingError（PDF 文件不存在）
         """
 
         # 1、参数非空校验
@@ -99,7 +99,8 @@ class NodePDFToMD(BaseNode):
         核心流程：配置校验 → 获取上传链接 → 文件上传 → 任务轮询（直至完成/失败/超时）
         参数：pdf_path_obj-已校验的PDF Path对象
         返回：解析结果ZIP包下载链接full_zip_url
-        异常：ValueError(配置缺失)、RuntimeError(请求/上传失败)、TimeoutError(任务超时)
+        异常：ConfigurationError（MinerU 配置缺失）、PdfConversionError（取上传链接/上传/轮询失败）、
+             TimeoutError（轮询总超时）
         """
         # 1、配置文件校验
         if not mineru_config.base_url:
@@ -208,7 +209,8 @@ class NodePDFToMD(BaseNode):
        核心流程：下载ZIP → 清理旧目录并解压 → 查找MD文件 → 重命名统一为PDF同名
        参数：zip_url-ZIP包下载链接；output_dir_obj-输出目录Path；pdf_stem-PDF无后缀纯名称
        返回：最终MD文件的字符串格式绝对路径
-       异常：RuntimeError(下载失败)、FileNotFoundError(无MD文件)
+       异常：RuntimeError（ZIP 下载失败）；ZIP 包损坏时由 zipfile 抛 BadZipFile，包内无 full.md
+            时由 rename 抛 FileNotFoundError——这两类没做显式包装，保留库原生异常
        """
 
         # 1、下载ZIP包（流式：大文件整块进内存既爆内存，也容易触发读取超时）

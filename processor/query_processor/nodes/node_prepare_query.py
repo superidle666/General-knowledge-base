@@ -20,10 +20,11 @@ from processor.query_processor.prompt.entity_extract import (
 )
 from processor.query_processor.state import QueryGraphState
 from tool.logger import logger
+from utils.entity_patterns import find_shape_mentions, is_specific_model_code
 
 
-MODEL_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]{1,}(?:-[A-Z0-9]+)+\b")
-PRODUCT_PATTERN = re.compile(r"(?:华为|Huawei)[^，。！？\n]{0,24}(?:平板|电脑|笔记本|手机|设备)")
+# 实体形状（型号代码 / 字母数字串 / 品牌+品类短语）的正则与词表统一住在
+# utils.entity_patterns（P2-8），本节点与闲聊闸共用同一套口径，不再自带一份。
 REFERENCE_PATTERN = re.compile(r"(?:这款|这个|该设备|该产品|它|上述(?:设备|产品))")
 
 # 检索侧实体对齐只在 required 库执行。LLM 抽取兜一个硬超时 + 零重试：同步问答跑在线程池里，
@@ -242,14 +243,19 @@ class NodePrepareQuery(NodeBase):
 
     @staticmethod
     def _query_names_model_code(state: QueryGraphState, mentions: list[str]) -> bool:
-        """拒答只针对"当前问题本身点名了一个具体型号代码"：提及既要形如 MODEL_PATTERN（大写字母数字带连字符，
-        如 APL-005），又要确实出现在当前问题文本里。历史或助手答案中出现过的代码不算用户提及，
-        避免上一轮助手罗列过型号时，本轮品牌/泛问题被误判为"点名了查无的型号"。"""
+        """拒答只针对"当前问题本身点名了一个具体型号代码"：提及既要形如收紧档型号代码
+        （带连字符且含≥2 位数字，如 APL-005），又要确实出现在当前问题文本里。历史或助手
+        答案中出现过的代码不算用户提及，避免上一轮助手罗列过型号时，本轮品牌/泛问题被
+        误判为"点名了查无的型号"。
+
+        这里刻意不用抽取侧那个宽松档：windows10 / wifi6 / G740 这类形状上跟型号无差异的
+        版本号一旦被当成"点名型号"，代价是把本可以 best-effort 回答的问题直接拒掉。
+        """
         query_norm = NodePrepareQuery._normalize(
             str(state.get("rewritten_query") or state.get("original_query") or "")
         )
         return any(
-            MODEL_PATTERN.search(str(mention))
+            is_specific_model_code(mention)
             and NodePrepareQuery._normalize(mention) in query_norm
             for mention in mentions
         )
@@ -258,11 +264,9 @@ class NodePrepareQuery(NodeBase):
         """正则 + 有界 LLM 双通道抽取实体名，按归一化去重并封顶，保留首个出现的表面形式。"""
         text = str(state.get("rewritten_query") or state.get("original_query") or "")
         history_text = self._recent_history_text(state.get("history"))
-        raw_mentions: list[str] = []
         # 正则只扫当前问题：历史里（尤其助手自己罗列的型号清单）混有大量型号代码，
         # 一并扫描会把"上一轮答案引用过的实体"误当成本轮用户提及，污染候选甚至误触发拒答。
-        for pattern in (MODEL_PATTERN, PRODUCT_PATTERN):
-            raw_mentions.extend(match.strip() for match in pattern.findall(text))
+        raw_mentions: list[str] = find_shape_mentions(text)
         raw_mentions.extend(self._call_entity_llm(text, history_text))
 
         ordered: dict[str, str] = {}
@@ -356,12 +360,7 @@ class NodePrepareQuery(NodeBase):
             for message in reversed(history)
             if isinstance(message, dict)
         )
-        entities: list[str] = []
-        for pattern in (MODEL_PATTERN, PRODUCT_PATTERN):
-            for match in pattern.findall(recent_text):
-                value = match.strip()
-                if value and value not in entities:
-                    entities.append(value)
+        entities = find_shape_mentions(recent_text)
         if not entities:
             return query
         rewritten = f"{' '.join(entities[:3])} {query}".strip()

@@ -7,6 +7,9 @@
 @BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL；
               白名单外的 markdown 图片（模型臆造的 URL）要从答案正文中剜除，
               否则前端按 markdown 渲染整段答案时会直接展示出裂图。
+              用户端展示的引用来源必须与生成时真正喂进 prompt 的切片同源：上游
+              node_source_collection 的二次裁剪会因为高分噪声块抬高淘汰线而漏掉真正
+              支撑答案的切片，故本节点用"进入 prompt 的切片集合"覆盖 state['sources']。
 """
 
 import re
@@ -131,17 +134,27 @@ class NodeAnswerOutput(NodeBase):
         # 1. 获取问题和商品名
         # 优先使用重写后的问题
         question = state.get("rewritten_query") or state.get("original_query", "")
-        item_names = state["item_names"]
+        # 图内跑下来 node_prepare_query 总会先把 item_names 归一成列表；但绕开入口
+        # 直接调本节点（脚本、单测）时它可能根本没这个键，硬下标会让“没有实体”
+        # 这种正常情况抛 KeyError。
+        item_names = state.get("item_names") or []
 
         # 2. 为历史对话预留独立预算，避免长文档挤掉多轮上下文
         history_str, _ = self._format_chat_history(
             state.get("history") or [], MAX_HISTORY_CHARS
         )
 
-        # 3. 格式化上下文文档
-        context_str, _ = self._format_reranked_docs(
+        # 3. 格式化上下文文档，并记录"真正进入 prompt 的那批切片"
+        context_str, used_docs, _ = self._select_context_docs(
             state.get("reranked_docs") or [], MAX_CONTEXT_CHARS - MAX_HISTORY_CHARS
         )
+
+        # 3.1 引用与生成同源：把用户端 sources 覆盖为模型实际读到的切片集合。
+        # node_source_collection 用相对地板分 + 正文长度对 reranked_docs 做了二次裁剪，
+        # 一旦某个高分但无实质信息的切片（如仅命中型号名的"文档信息"块）抬高了淘汰线，
+        # 真正支撑答案的切片会被挤出引用区，出现"答案正确、来源却查不到依据"的假象。
+        # 展示给用户的来源必须等于生成时喂进去的那份，故在此覆盖。
+        state["sources"] = self._step_2b_generation_sources(state, used_docs)
 
         # 4. 格式化 Item Names (提问商品)
         item_names_str = ", ".join(item_names) if item_names else "无指定商品"
@@ -156,9 +169,49 @@ class NodeAnswerOutput(NodeBase):
         logger.info(f"组装后的提示词为：{prompt}")
         return prompt
 
+    @staticmethod
+    def _step_2b_generation_sources(state: QueryGraphState, used_docs: List[Dict]) -> List[Dict]:
+        """把进入 prompt 的切片整理为用户端来源结构，并标注分数字段口径。
+
+        score_kind：
+          - "rerank"：交叉编码器给出的相关性分，可作为"相对可信"的参考分；
+          - "recall"：精排失败降级后的召回序投影分，只能用于排序、不代表置信度，
+            前端据此避免把它渲染成误导性的百分比。
+        """
+        score_kind = "recall" if state.get("rerank_failed") else "rerank"
+        sources: List[Dict] = []
+        for doc in used_docs:
+            item = dict(doc)
+            raw_score = item.get("score")
+            try:
+                item["score"] = float(raw_score) if raw_score is not None else None
+            except (TypeError, ValueError):
+                item["score"] = None
+            item.setdefault("source", "local")
+            item["score_kind"] = score_kind
+            sources.append(item)
+        return sources
+
     def _format_reranked_docs(self, reranked_docs: List[Dict], char_budget: int) -> Tuple[str, int]:
-        """格式化重排序文档，带字符预算控制"""
+        """[兼容旧签名] 返回 (拼好的上下文, 剩余预算)。
+
+        实际"纳入哪些切片"的逻辑在 _select_context_docs；这里只是它的薄封装，保留
+        (str, int) 两值返回给既有调用与回归用例。需要拿到被选中的切片时请直接调用
+        _select_context_docs。
+        """
+        formatted, _used_docs, remaining = self._select_context_docs(reranked_docs, char_budget)
+        return formatted, remaining
+
+    def _select_context_docs(
+        self, reranked_docs: List[Dict], char_budget: int
+    ) -> Tuple[str, List[Dict], int]:
+        """按字符预算把重排切片拼进 prompt，返回 (上下文, 实际纳入的切片, 剩余预算)。
+
+        "实际纳入的切片"用于让引用展示与生成所用同源：预算截断后没进 prompt 的切片，
+        模型没读过，就不该出现在给用户的来源里；反之进了 prompt 的都必须可被引用。
+        """
         formatted_lines = []
+        used_docs: List[Dict] = []
         used_chars = 0
 
         # 从重排内容中，提取为资料字符串，不可超过限额
@@ -203,9 +256,10 @@ class NodeAnswerOutput(NodeBase):
                 break
 
             formatted_lines.append(doc_entry)
+            used_docs.append(doc)
             used_chars += len(doc_entry) + 2
 
-        return "\n\n".join(formatted_lines), char_budget - used_chars
+        return "\n\n".join(formatted_lines), used_docs, char_budget - used_chars
 
     def _format_chat_history(self, chat_history: List[Dict], char_budget: int) -> Tuple[str, int]:
         """格式化历史对话；预算截断时保留最近的几轮。

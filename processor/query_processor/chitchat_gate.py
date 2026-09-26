@@ -21,6 +21,7 @@ import random
 import re
 
 from tool.logger import logger
+from utils.entity_patterns import ENTITY_SIGNAL_TERMS, looks_like_model
 
 # 归一化用的标点集合（中英文常见分隔符 + 空白），命中判断按去标点后的整句做子串匹配。
 # 连字符类单独说明：“HAK-180”与“HAK180”是同一个型号的两种写法，不去掉会
@@ -69,18 +70,6 @@ _EMOTION_TERMS = (
 # 字面又可能沾业务词，不硬猜，留给 L2 分类决定。
 _INTERROGATIVE_MARKERS = ("怎么", "怎样", "什么", "多少", "吗", "呢", "几", "哪", "为何", "为什么")
 
-# 型号/产品信号：出现任一即不判闲聊（宁可多走一次检索，也不能把产品问题挡掉）。
-# 刻意宽松，只为压低"误伤真实产品提问"的概率；它命中只会退化成现状（检索），不会答错。
-_MODEL_CODE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)+")  # 形如 HAK-180 / DBY-W09
-_MODEL_SLUG_RE = re.compile(r"[A-Za-z]+\d+[A-Za-z0-9]*")  # 形如 G740 / S25 / HAK180 / FX8P
-
-_BRAND_TERMS = (
-    "华为", "huawei", "小米", "红米", "iphone", "ipad", "imac", "macbook", "airpods",
-    "一加", "oneplus", "oppo", "vivo", "三星", "samsung", "荣耀", "honor", "联想",
-    "thinkpad", "笔记本", "电脑", "平板", "手机", "耳机", "手表", "路由器", "交换机",
-    "服务器", "打印机", "显示器", "烫金机", "设备", "机型", "型号", "配置", "参数",
-)
-
 
 def _normalize(text: object) -> str:
     """去空白与标点、转小写，用于整句/子串匹配；只保留中英文与数字。"""
@@ -94,14 +83,19 @@ def normalize_for_match(text: object) -> str:
 
 
 def contains_entity_signal(text: object) -> bool:
-    """判断文本里是否含产品/型号信号：型号代码、字母数字型号串、或品牌/产品品类词。"""
+    """判断文本里是否含产品/型号信号：型号代码、字母数字型号串、或品牌/产品品类词。
+
+    形状正则与词表集中在 utils.entity_patterns（P2-8 归一），本函数只用它的**宽松档**：
+    命中只会退化成现状（走检索），不会答错，所以判"像不像实体"越宽越好；拒答那种会造成
+    用户可见错误的判定用的是同一模块里的收紧档，两者刻意不是同一个函数。
+    """
     raw = str(text or "").strip()
     if not raw:
         return False
-    if _MODEL_CODE_RE.search(raw) or _MODEL_SLUG_RE.search(raw):
+    if looks_like_model(raw):
         return True
     normalized = _normalize(raw)
-    return any(term in normalized for term in _BRAND_TERMS)
+    return any(term in normalized for term in ENTITY_SIGNAL_TERMS)
 
 
 # 有序匹配表：先细（型号/身份策略）后粗（问候/致谢/告别），用子串命中，靠实体护栏 + 短句上限兜精度。

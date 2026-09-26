@@ -342,6 +342,9 @@ class QuerySourceOut(BaseModel):
     parent_title: str | None = None
     content: str = ""
     score: float | None = None
+    # 分数口径：rerank=交叉编码器相关性（可作参考分）；recall=精排降级后的召回序
+    # 投影分（只能排序、不代表置信度），前端据此避免展示成误导性的百分比。
+    score_kind: str = "rerank"
     source: str = "local"
     url: str | None = None
     site_name: str | None = None

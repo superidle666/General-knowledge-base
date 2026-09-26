@@ -158,6 +158,105 @@ def returned_dict_keys(path: Path, class_name: str, method_name: str) -> set[str
     raise AssertionError(f"{path.as_posix()} 中找不到类 {class_name}，请同步更新用例")
 
 
+def state_key_writes(
+        path: Path, class_name: str, method_name: str, variable: str = "state") -> set[str]:
+    """收集某个节点方法往状态字典里写过的键名。
+
+    节点按“返回完整 state”的契约写时，`returned_dict_keys` 找不到任何字面量字典，
+    “返回键 ⊆ 声明键”那条守卫会退化成空集恒真；这时必须改看写入键。方法不存在时
+    抛错，防止节点方法改名后守卫静默失效。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.ClassDef) and node.name == class_name):
+            continue
+        for member in ast.walk(node):
+            if not (isinstance(member, ast.FunctionDef) and member.name == method_name):
+                continue
+            keys: set[str] = set()
+            for child in ast.walk(member):
+                # state["key"] = ...
+                if isinstance(child, ast.Assign):
+                    for target in child.targets:
+                        keys.update(_subscript_name(target, variable))
+                # state.update({"key": ...}) / state.setdefault("key", ...)
+                if (
+                    isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id == variable
+                    and child.func.attr in {"update", "setdefault"}
+                    and child.args
+                ):
+                    first = child.args[0]
+                    if child.func.attr == "update" and isinstance(first, ast.Dict):
+                        keys.update(
+                            key.value for key in first.keys
+                            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                        )
+                    elif (
+                        child.func.attr == "setdefault"
+                        and isinstance(first, ast.Constant)
+                        and isinstance(first.value, str)
+                    ):
+                        keys.add(first.value)
+            return keys
+        raise AssertionError(f"{class_name} 中没有 {method_name} 方法，请同步更新用例")
+    raise AssertionError(f"{path.as_posix()} 中找不到类 {class_name}，请同步更新用例")
+
+
+def _subscript_name(node: ast.AST, variable: str) -> set[str]:
+    """从 `state["key"]` 这类下标节点取出键名；不是该变量的下标就返回空集。"""
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == variable
+        and isinstance(node.slice, ast.Constant)
+        and isinstance(node.slice.value, str)
+    ):
+        return {node.slice.value}
+    return set()
+
+
+def literal_string_returns(path: Path, function_name: str) -> set[str]:
+    """取某个函数所有 `return` 里出现的字符串字面量（用来查“恒单值的条件边路由函数”）。
+
+    三元写法 `return "a" if ok else "b"` 必须也算进去：它的 Return.value 是 IfExp 而不是
+    Constant，只看直接常量会把这种正常路由误判成“没有字面量返回值”。
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == function_name:
+            options: set[str] = set()
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Return):
+                    continue
+                options.update(
+                    sub.value
+                    for sub in ast.walk(child)
+                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                )
+            return options
+    raise AssertionError(f"{path.as_posix()} 中找不到函数 {function_name}，请同步更新用例")
+
+
+def conditional_edge_targets(path: Path) -> dict[str, str]:
+    """取 `add_conditional_edges(节点, 路由函数, ...)` 的 节点名 -> 路由函数名表达式。"""
+    edges: dict[str, str] = {}
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "add_conditional_edges"
+            and len(node.args) >= 2
+        ):
+            source = node.args[0]
+            if isinstance(source, ast.Constant) and isinstance(source.value, str):
+                edges[source.value] = ast.unparse(node.args[1])
+    return edges
+
+
 def imported_names(path: Path, module: str) -> set[str]:
     """读取文件从指定模块导入了哪些名字（用于“不得再引用旧集合”这类防回归断言）。"""
     names: set[str] = set()

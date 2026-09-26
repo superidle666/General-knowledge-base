@@ -53,8 +53,12 @@ class NodeSourceCollection(NodeBase):
         local_quota = min(limit, math.ceil(limit * LOCAL_MIN_SLOT_RATIO))
         picked_local = local_candidates[:local_quota]
         picked_web = web_candidates[: limit - len(picked_local)]
-        # 联网没填满让出的槽位时，本地继续补上：配额不能反过来减少总来源数
-        picked_local += local_candidates[len(picked_local): len(picked_local) + (limit - len(picked_local) - len(picked_web))]
+        # 联网没填满让出的槽位时，本地继续补上：配额不能反过来减少总来源数。
+        # 写成显式 remaining 而不是把负数塞进切片下标：语义一样，但后者要读者
+        # 先想清“len 到 len+负数”为空切片才能确认它不会反向削本地已选中的部分。
+        remaining = limit - len(picked_local) - len(picked_web)
+        if remaining > 0:
+            picked_local += local_candidates[len(picked_local): len(picked_local) + remaining]
 
         sources = picked_local + picked_web
         sources.sort(key=lambda item: item["score"] or 0.0, reverse=True)

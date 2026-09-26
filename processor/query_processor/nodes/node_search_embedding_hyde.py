@@ -45,13 +45,17 @@ class NodeSearchEmbeddingHyde(NodeBase):
         3. 混合检索 (Step 2)：
            - 将“用户问题 + 假设文档”合并，生成BGE-M3稠密+稀疏向量。
            - 在与本地检索同一个集合上执行混合检索（带知识库隔离与实体过滤）。
-        4. 结果封装：返回归一化后的切片列表、假设文档原文，以及本路是否失败的标记。
+        4. 结果封装：把归一化后的切片列表、假设文档原文与本路是否失败的标记写回 state。
 
         失败一律降级为空召回并置 hyde_failed，不能让整个问答请求因增强链路失败而失败：
         此时 RRF 只剩本地一路，答案质量下降但仍可回答。
 
+        返回完整 state（与图里其他节点同一契约）：部分返回在 LangGraph 里虽然合法，
+        但两种契约混着用会让人不确定“改过的 state 到底能不能直接往回接”，
+        而且本文件底部的手工入口本来就要看到完整状态。
+
         :param state: 会话状态字典，包含 rewritten_query, library_id, item_names 等
-        :return: 包含 hyde_embedding_chunks、hyde_doc 与 hyde_failed 的字典
+        :return: 写回 hyde_embedding_chunks、hyde_doc 与 hyde_failed 后的完整 state
         """
 
         # 1、用户问题、目标知识库和已确认实体名
@@ -61,11 +65,15 @@ class NodeSearchEmbeddingHyde(NodeBase):
 
         if not rewritten_query:
             logger.info("步骤1: 无有效问题，跳过 HyDE 检索")
-            return {"hyde_embedding_chunks": [], "hyde_failed": False}
+            state["hyde_embedding_chunks"] = []
+            state["hyde_failed"] = False
+            return state
 
         if not isinstance(library_id, int) or library_id <= 0:
             logger.warning("步骤1: library_id 无效，跳过 HyDE 检索：%s", library_id)
-            return {"hyde_embedding_chunks": [], "hyde_failed": True}
+            state["hyde_embedding_chunks"] = []
+            state["hyde_failed"] = True
+            return state
 
         try:
 
@@ -82,15 +90,16 @@ class NodeSearchEmbeddingHyde(NodeBase):
             )
 
             # 4、结果封装
-            return {
-                "hyde_embedding_chunks": res,
-                "hyde_doc": hyde_doc,
-                "hyde_failed": False,
-            }
+            state["hyde_embedding_chunks"] = res
+            state["hyde_doc"] = hyde_doc
+            state["hyde_failed"] = False
+            return state
 
         except Exception as e:
             logger.exception(f"假设性文档向量搜索失败，本路召回置空: {e}")
-            return {"hyde_embedding_chunks": [], "hyde_failed": True}
+            state["hyde_embedding_chunks"] = []
+            state["hyde_failed"] = True
+            return state
 
     def _step_1_create_hyde_doc(self, rewritten_query: str) -> str:
         """
@@ -103,16 +112,11 @@ class NodeSearchEmbeddingHyde(NodeBase):
         """
 
         logger.info("步骤1: 开始生成假设性文档")
-
-        try:
-            llm = get_llm_client()
-            hyde_prompt = HYDE_PROMPT.format(rewritten_query=rewritten_query)
-            hyde_doc = llm.invoke(hyde_prompt).content
-            return hyde_doc
-
-        except Exception as e:
-            logger.exception(f"步骤1: 生成假设文档失败: {e}")
-            raise e
+        # 不在这里包一层 except→log→raise e：那只会多打一条日志、还要重新抛一次。
+        # 直接往上抛，由 process 的降级分支统一接住（logger.exception 带完整 traceback）。
+        llm = get_llm_client()
+        hyde_prompt = HYDE_PROMPT.format(rewritten_query=rewritten_query)
+        return llm.invoke(hyde_prompt).content
 
     def _step_2_search_embedding_hyde(
             self,

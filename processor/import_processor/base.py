@@ -10,12 +10,6 @@ from processor.import_processor.exceptions import ImportProcessError
 from tool.logger import configure_logging
 from utils.task_utils import add_running_task, add_done_task
 
-"""
-导入流程节点基类
-
-定义统一的节点接口规范，提供通用功能
-"""
-
 from abc import ABC, abstractmethod
 from typing import TypeVar, Optional
 import logging
@@ -71,17 +65,22 @@ class BaseNode(ABC):
         Raises:
             ImportProcessError: 节点执行失败时抛出
         """
+        # 节点级跟踪只在走 Worker / 接口时才有意义；脚本与单测里直接跑单个节点时 state
+        # 常常没有 task_id，这里容忍空值（跳过跟踪），不再用 KeyError 惩罚那种用法。
+        task_id = state.get("task_id")
         try:
             # 1. 开始准备执行节点
             self.logger.info(f"--- {self.name} 开始 ---")
             # 开始：记录节点运行状态
-            add_running_task(state["task_id"], self.name)
+            if task_id:
+                add_running_task(task_id, self.name)
 
             # 2. 执行节点
             result = self.process(state)
 
             # 结束：记录节点完成状态
-            add_done_task(state["task_id"], self.name)
+            if task_id:
+                add_done_task(task_id, self.name)
             # 3. 执行节点成功
             self.logger.info(f"--- {self.name} 完成 ---")
 

@@ -19,6 +19,7 @@ from graph_introspection import (
     PROJECT_ROOT,
     imported_names,
     returned_dict_keys,
+    state_key_writes,
     typed_dict_keys,
 )
 from processor.query_processor.nodes.node_source_collection import NodeSourceCollection
@@ -171,17 +172,24 @@ def test_both_retrieval_nodes_share_one_field_and_weight_source() -> None:
         assert "OUTPUT_FIELDS = (" not in path.read_text(encoding="utf-8")
 
 
-def test_enhanced_nodes_declare_state_keys_in_schema() -> None:
-    """LangGraph 会静默丢弃未在状态里声明的返回键——失败标记一旦丢不到，前端就永远看不到降级。"""
+def test_enhanced_nodes_write_only_declared_state_keys() -> None:
+    """LangGraph 会静默丢弃未在状态里声明的返回键——失败标记一旦丢不到，前端就永远看不到降级。
+
+    增强节点已改成“写回并返回完整 state”（P2-5），所以只能按写入键校验：
+    `returned_dict_keys` 在这种契约下永远是空集，拿它做“非空”断言会变成恒真。
+    """
     declared = typed_dict_keys(QUERY_STATE, "QueryGraphState")
     for path, class_name in (
         (HYDE_NODE, "NodeSearchEmbeddingHyde"),
         (WEB_NODE, "NodeWebSearchMcp"),
     ):
-        returned = returned_dict_keys(path, class_name, "process")
-        assert returned, f"{class_name}.process 没有返回任何字面量键"
-        undeclared = returned - declared
-        assert not undeclared, f"{class_name}.process 返回了未声明的状态键：{sorted(undeclared)}"
+        written = state_key_writes(path, class_name, "process")
+        assert written, f"{class_name}.process 没往 state 里写过任何键"
+        undeclared = written - declared
+        assert not undeclared, f"{class_name}.process 写了未声明的状态键：{sorted(undeclared)}"
+        # 契约本身也要锁住：退回“新建一个部分字典”会让上面的写入键守卫又一次变成空集
+        assert not returned_dict_keys(path, class_name, "process"), \
+            f"{class_name}.process 又返回了部分字典，与图里其他节点契约不一致"
 
 
 def test_failure_markers_are_declared_in_state() -> None:
@@ -242,7 +250,8 @@ def test_web_search_degrades_to_empty_docs_on_failure(monkeypatch) -> None:
 
     monkeypatch.setattr(node, "_mcp_call", broken_call)
     result = node.process({"rewritten_query": "HAK180 报错 E12 怎么处理"})
-    assert result == {"web_search_docs": [], "web_search_failed": True}
+    assert result["web_search_docs"] == []
+    assert result["web_search_failed"] is True
 
 
 def test_web_search_reports_failure_flag_on_success(monkeypatch) -> None:
@@ -260,7 +269,8 @@ def test_web_search_reports_failure_flag_on_success(monkeypatch) -> None:
 
 def test_web_search_is_skipped_without_question() -> None:
     result = NodeWebSearchMcp().process({"rewritten_query": "   ", "original_query": ""})
-    assert result == {"web_search_docs": [], "web_search_failed": False}
+    assert result["web_search_docs"] == []
+    assert result["web_search_failed"] is False
 
 
 # --------------------------------------------------------------------------

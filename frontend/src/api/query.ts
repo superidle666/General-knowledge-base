@@ -22,6 +22,8 @@ export type QuerySource = {
   parent_title: string | null
   content: string
   score: number | null
+  // rerank=交叉编码器相关性（可展示为百分比）；recall=精排降级后的召回序分（不代表置信度）
+  score_kind: string
   source: string
   url: string | null
   site_name: string | null

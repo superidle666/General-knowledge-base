@@ -10,12 +10,13 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from processor.import_processor.base import BaseNode, setup_logging
 from processor.import_processor.exceptions import ImportProcessError, StateFieldError
 from processor.import_processor.state import ImportGraphState
+from utils.entity_patterns import FILENAME_MODEL_TOKEN
 from utils.llm_utils import get_llm_client
 
 Recognizer = Callable[[str, list[dict[str, Any]]], object]
 
-# 文件名型号 token：字母开头、含连字符的型号串（如 HAK-180、LA2608-A）。
-_MODEL_TOKEN = re.compile(r"[A-Za-z]{2,}[A-Za-z0-9]*(?:[-][A-Za-z0-9]+)+")
+# 文件名型号 token 集中在 utils.entity_patterns（与查询侧型号正则同一处），它是其中
+# 更严的一档：命中就把整个文件名当主实体先验，所以要求至少两个字母的前缀。
 _FILE_EXTENSION = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 
 
@@ -124,7 +125,7 @@ class NodeEntityRecognitionRequired(BaseNode):
     def _filename_model(file_title: str) -> str:
         """文件名含型号 token 时，返回去掉扩展名的文件名作为主实体先验。"""
         stem = _FILE_EXTENSION.sub("", file_title.strip()).strip()
-        return stem if _MODEL_TOKEN.search(stem) else ""
+        return stem if FILENAME_MODEL_TOKEN.search(stem) else ""
 
     def _parse_result(self, raw: object) -> dict[str, Any]:
         """把模型或注入识别器的返回统一规整为 {main_entity, candidates, status}。"""

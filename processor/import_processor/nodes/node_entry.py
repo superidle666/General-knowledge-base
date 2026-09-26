@@ -22,7 +22,7 @@ class NodeEntry(BaseNode):
     name = "node_entry"
 
     def process(self, state: ImportGraphState):
-        """Validate the uploaded file and initialize PDF or Markdown state fields."""
+        """验证上传的文件，并初始化PDF或Markdown状态字段。"""
         #从state中获取文件绝对路径
         import_file_path = state.get("import_file_path")
         #判断路径是否为空

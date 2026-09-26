@@ -3,7 +3,9 @@
 """
 导入流程配置管理模块
 
-集中管理所有配置项，支持环境变量覆盖
+只放导入流程特有的阈值。连接类参数（MinerU / OpenAI / Milvus / MinIO / 向量维度）
+一律由 config/* 提供，这里不再重复一份——同一参数两处定义时，改配置不生效的问题
+只能靠人记住哪一处才是真的生效（P1-8 修的图片限流口径就是这一类）。
 """
 
 from dataclasses import dataclass, field
@@ -21,9 +23,7 @@ class ImportConfig:
 
     # ==================== 文档处理配置 ====================
     max_content_length: int = 2000      # 切片最大长度
-    img_content_length: int = 200       # 图片上下文最大长度
     min_content_length: int = 500       # 合并短内容的最小长度
-    overlap_sentences: int = 1          # 句子级切分时重叠句数
     item_name_chunk_k: int = 5          # 主实体枚举时的采样切片数量（首切片 + 均匀取）
     item_name_chunk_size: int = 800     # 单个采样切片注入模型的内容截断上限
     entity_enum_char_budget: int = 4000  # 主实体枚举拼接上下文的总字符预算，防止超长上下文
@@ -32,71 +32,25 @@ class ImportConfig:
     image_extensions: Set[str] = field(
         default_factory=lambda: {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
     )
-    # ==================== mineru 配置 ====================
-    mineru_api_token: str = field(
-        default_factory=lambda: os.getenv("MINERU_API_TOKEN")
-    )
-    mineru_base_url: str = field(
-        default_factory=lambda: os.getenv("MINERU_BASE_URL")
-    )
+
     # ==================== LLM 配置 ====================
-    openai_api_base: str = field(
-        default_factory=lambda: os.getenv("OPENAI_API_BASE", "")
-    )
-    openai_api_key: str = field(
-        default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
-    )
-    vl_model: str = field(
-        default_factory=lambda: os.getenv("VL_MODEL", "")
-    )
+    # 仅实体识别节点用这一个（它按模型名选实体模型）；其余模型参数走 config/lm_config.py。
+    # 给空串兜底而不是 None：类型标的是 str，取值处已用 `or None` 处理空值。
     item_model: str = field(
         default_factory=lambda: os.getenv("ITEM_MODEL", "")
     )
-    default_model: str = field(
-        default_factory=lambda: os.getenv("MODEL", "")
-    )
-
-    # ==================== Milvus 配置 ====================
-    milvus_url: str = field(
-        default_factory=lambda: os.getenv("MILVUS_URL", "")
-    )
-    chunks_collection: str = field(
-        default_factory=lambda: os.getenv("CHUNKS_COLLECTION", "")
-    )
-
-    # ==================== MinIO 配置 ====================
-    minio_endpoint: str = field(
-        default_factory=lambda: os.getenv("MINIO_ENDPOINT", "")
-    )
-    minio_access_key: str = field(
-        default_factory=lambda: os.getenv("MINIO_ACCESS_KEY", "")
-    )
-    minio_secret_key: str = field(
-        default_factory=lambda: os.getenv("MINIO_SECRET_KEY", "")
-    )
-    minio_bucket: str = field(
-        default_factory=lambda: os.getenv("MINIO_BUCKET_NAME", "")
-    )
-    minio_secure: bool = False
 
     # ==================== 向量配置 ====================
-    embedding_dim: int = field(
-        default_factory=lambda: int(os.getenv("EMBEDDING_DIM", "1024"))
-    )
     embedding_batch_size: int = 8
 
     # ==================== 速率限制 ====================
-    requests_per_minute: int = 15       # 图片总结 API 速率限制
+    # 图片总结 API 速率限制。作用域是“每个任务一个滑动窗口”，不是账号级全局窗口。
+    requests_per_minute: int = 15
 
     @classmethod
     def from_env(cls) -> "ImportConfig":
         """从环境变量加载配置"""
         return cls()
-
-    def get_minio_base_url(self) -> str:
-        """获取 MinIO 基础 URL"""
-        protocol = "https://" if self.minio_secure else "http://"
-        return protocol + f"{self.minio_endpoint}"
 
 
 # ==================== 全局单例 ====================
