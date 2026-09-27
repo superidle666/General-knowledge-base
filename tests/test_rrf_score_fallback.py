@@ -201,8 +201,10 @@ def _docs_with_scores(scores: list[float]) -> list[dict[str, Any]]:
 
 
 def test_cliff_detection_is_skipped_when_rerank_failed(rerank_down: None) -> None:
-    # 第 3、4 条之间差 0.55：按正常路径的阈值会被截到 3 条
-    state = {"original_query": "q", "top_k": 5, "rrf_chunks": _docs_with_scores(CLIFF_SCORES), "web_search_docs": []}
+    # 第 3、4 条之间差 0.55：按正常路径的阈值会被截到 3 条。
+    # top_k 给到 10（>候选数），确保 6 条全活只可能来自"降级不套断崖"、而非被 top_k 封顶截走
+    # （Phase3 决策1a 后降级出口也会按 clamp(top_k,..) 收窄，这里要让封顶不构成干扰变量）。
+    state = {"original_query": "q", "top_k": 10, "rrf_chunks": _docs_with_scores(CLIFF_SCORES), "web_search_docs": []}
     result = NodeRerank()(state)
 
     assert result["rerank_failed"] is True

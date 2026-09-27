@@ -13,6 +13,10 @@ RAGAS 检索问答质量评估脚本。
 用法（必须使用项目虚拟环境解释器，且在工作区根目录下运行）：
     .venv\\Scripts\\python.exe eval\\ragas_eval.py
     可选参数：--library-id 2 --top-k 5 --limit 3（只跑前 3 题冒烟）
+              --context-topk 3（默认；额外算"只供前 N 块 context"的 top-N 口径，0=关）
+
+为何双口径：全量口径下 faithfulness/context_recall 常被"喂很多块"撑到接近 1.0、失去
+区分度。与 top-N 口径并排对比才能分辨"真排好了"还是"堆料撑高"。
 
 依赖的外部服务：Milvus / MySQL / LLM API（与问答后端一致）；BGE-M3 首次加载需数十秒。
 """
@@ -57,18 +61,24 @@ from ragas.run_config import RunConfig  # noqa: E402
 QA_CSV_PATH = WORKSPACE_ROOT / "eval" / "qa.csv"
 RESULT_CSV_PATH = WORKSPACE_ROOT / "eval" / "qa_result.csv"
 
-# 结果 CSV 的 9 列：前 4 列是问答快照，后 5 列是 ragas 指标分数。
-# 列名沿用需求原文（含 "awnser" 这一既定拼写），保证与下游对账脚本一致。
-RESULT_COLUMNS = [
-    "question", "awnser", "context", "ground_truth",
-    "faithfulness", "answer_relevancy", "context_precision", "context_recall",
-    "answer_correctness",
-]
-
 # 每题评估失败的指标以空单元格落盘（区别于 0.0 这种合法最低分）。
 METRIC_NAMES = [
     "faithfulness", "answer_relevancy", "context_precision", "context_recall",
     "answer_correctness",
+]
+
+# 只有依赖 context 的指标才分"全量 / top-N"两种口径；answer_relevancy（答案↔问题）
+# 与 answer_correctness（答案↔参考）不看 context，两口径结果相同，不重复计算。
+CONTEXT_DEPENDENT_METRICS = ["faithfulness", "context_precision", "context_recall"]
+# top-N 口径的独立结果列，与全量列并排；列名 = 指标名 + "_topk"。
+TOPK_METRIC_NAMES = [f"{name}_topk" for name in CONTEXT_DEPENDENT_METRICS]
+
+# 结果 CSV 列：前 4 列问答快照，接着 5 列全量口径指标，最后 3 列 top-N 口径指标。
+# 列名沿用需求原文（含 "awnser" 这一既定拼写），保证与下游对账脚本一致。
+RESULT_COLUMNS = [
+    "question", "awnser", "context", "ground_truth",
+    *METRIC_NAMES,
+    *TOPK_METRIC_NAMES,
 ]
 
 
@@ -99,6 +109,15 @@ def _log_qa_detail(row: EvalRow, idx: int, total: int, preview_chars: int) -> No
     for i, context in enumerate(row.contexts, 1):
         print(f"  #{i} {_preview(context, preview_chars)}")
     print(f"[模型答案] {_preview(row.answer, preview_chars)}")
+    dropped = getattr(row, "dropped_heading_only", 0)
+    trace = getattr(row, "rerank_trace", [])
+    print(f"[诊断] RRF 候选中被判'纯标题空块'、已在精排前剔除：{dropped} 个")
+    if trace:
+        print("[诊断] 最终喂模型的 reranked_docs 排序（rank | score | 正文字数 | 来源 | 标题）：")
+        for t in trace:
+            score = t.get("score")
+            score_s = f"{score:.3f}" if isinstance(score, (int, float)) else "  —  "
+            print(f"    #{t['rank']:>2}  {score_s}  clen={t['clen']:>4}  [{t.get('source')}]  {t['title']!r}")
 
 
 @dataclass
@@ -123,7 +142,9 @@ class EvalRow:
         answer: 系统生成的答案（工作流 state 的 answer 字段）。
         contexts: 生成答案时实际喂给模型的检索上下文正文列表（取自 reranked_docs，
             每个元素一个切片，不拼接），对应 ragas 的 retrieved_contexts。
-        scores: 指标名 -> 分数（0~1）；评估失败的指标不出现在其中。
+        scores: 全量口径（context=全部 reranked_docs）下各指标名 -> 分数（0~1）。
+        scores_topk: top-N 口径（context 截断到前 N 块）下，仅依赖 context 的指标名 -> 分数；
+            用于与全量并排对比，判断指标是否靠"堆料"撑高。以根指标名为键。
         error: 问答链路失败时的错误摘要，成功时为 None。
     """
     pair: QAPair
@@ -132,6 +153,11 @@ class EvalRow:
     # scores 必须是真字典而不是 None：step_6 直接 row.scores[name]=… 写回，
     # 之前默认 None 会让"指标算成功了但写回崩在 NoneType 不支持项赋值"。
     scores: dict[str, float] = field(default_factory=dict)
+    scores_topk: dict[str, float] = field(default_factory=dict)
+    # 排序诊断（--no-eval 单点排查用）：rrf 候选中被 2a 判为纯标题空块并剔除的数量，
+    # 以及最终喂模型的 reranked_docs 逐条排序快照（rank/score/正文字数/标题）。
+    dropped_heading_only: int = 0
+    rerank_trace: list[dict] = field(default_factory=list)
     error: str | None = None
 
 
@@ -246,6 +272,24 @@ def step_3_run_query_sync(question: str, library_id: int, top_k: int, library_co
         for doc in (result.get("reranked_docs") or [])
         if str(doc.get("content") or "").strip()
     ]
+    # 排序诊断：复用 node_rerank 的同一判据算“剔了几个标题空块”，并把最终进模型的块排序快照下来。
+    # 目的：当 context_recall=1（答案块其实召回了）但 top-3 precision=0 时，能直接看到“是谁压住了答案块”。
+    try:
+        from processor.query_processor.nodes.node_rerank import NodeRerank
+        rrf_chunks = result.get("rrf_chunks") or []
+        row.dropped_heading_only = sum(1 for d in rrf_chunks if NodeRerank._is_heading_only_doc(d))
+    except Exception:
+        row.dropped_heading_only = 0
+    row.rerank_trace = [
+        {
+            "rank": rank,
+            "score": doc.get("score"),
+            "clen": len(str(doc.get("content") or "").strip()),
+            "title": str(doc.get("title") or "").strip()[:40],
+            "source": doc.get("source"),
+        }
+        for rank, doc in enumerate(result.get("reranked_docs") or [], 1)
+    ]
     return row
 
 
@@ -324,21 +368,32 @@ def step_5_build_metrics(
     return metrics
 
 
-async def step_6_evaluate_all(rows: list[EvalRow], metrics: dict[str, object]) -> None:
-    """步骤 6：对每题构建 SingleTurnSample 并计算 5 项指标（就地写回 row.scores）。
+async def step_6_evaluate_all(rows: list[EvalRow], metrics: dict[str, object], context_topk: int = 0) -> None:
+    """步骤 6：对每题构建 SingleTurnSample 并计算指标（就地写回 row.scores / scores_topk）。
+
+    两种口径：
+    - 全量口径：retrieved_contexts = 全部 reranked_docs，写回 row.scores（5 项指标）。
+    - top-N 口径（context_topk>0 时）：retrieved_contexts 只取前 N 块，仅对
+      CONTEXT_DEPENDENT_METRICS 追加计算并写回 row.scores_topk。切片数已 <=N 时不重跑
+      （省一次 LLM 调用），gather 后直接从全量分复制。
 
     :param rows: step_3 产出的评估行（answer/contexts 已填）；问答链路失败的行跳过评估
     :param metrics: step_5 的指标实例；各指标并发跑，指标内样本由 ragas 限流
-    :return: None（分数写回 row.scores，失败指标记录到 row.error 附注）
+    :param context_topk: >0 时额外评估"只取前 N 块 context"的口径，默认 0（关闭）
+    :return: None（分数写回 row.scores / row.scores_topk，失败指标记录到 row.error 附注）
     """
     sem = asyncio.Semaphore(4)  # 跨指标同时最多 4 题在评，兜住 LLM 网关 QPS
     to_eval = [r for r in rows if r.error is None]
-    print(f"[step_6] 开始计算 5 项指标（待评估 {len(to_eval)} 题 × {len(metrics)} 指标）…")
+    modes = f"全量 + top-{context_topk} 双口径" if context_topk > 0 else "全量单口径"
+    print(f"[step_6] 开始计算指标（{modes}，待评估 {len(to_eval)} 题 × {len(metrics)} 指标）…")
 
-    async def score_one(row: EvalRow, metric_name: str, metric: object) -> None:
+    async def score_one(
+        row: EvalRow, metric_name: str, metric: object,
+        contexts: list[str], target: dict[str, float], label: str = "",
+    ) -> None:
         sample = SingleTurnSample(
             user_input=row.pair.question,
-            retrieved_contexts=row.contexts or [],
+            retrieved_contexts=contexts or [],
             response=row.answer,
             reference=row.pair.ground_truth,
         )
@@ -346,21 +401,34 @@ async def step_6_evaluate_all(rows: list[EvalRow], metrics: dict[str, object]) -
             started = time.perf_counter()
             try:
                 score = await metric.single_turn_ascore(sample)  # type: ignore[attr-defined]
-                row.scores[metric_name] = float(score)
+                target[metric_name] = float(score)
                 print(
-                    f"  [{row.pair.question[:24]}…] {metric_name}={score:.4f} "
+                    f"  [{row.pair.question[:24]}…] {metric_name}{label}={score:.4f} "
                     f"({time.perf_counter() - started:.1f}s)"
                 )
             except Exception as error:
-                row.error = (row.error or "") + f" | {metric_name} failed: {error}"
-                print(f"  [{row.pair.question[:24]}…] {metric_name} 评估失败: {error}")
+                row.error = (row.error or "") + f" | {metric_name}{label} failed: {error}"
+                print(f"  [{row.pair.question[:24]}…] {metric_name}{label} 评估失败: {error}")
 
-    tasks = [
-        score_one(row, name, metric)
-        for row in to_eval
-        for name, metric in metrics.items()
-    ]
+    tasks = []
+    for row in to_eval:
+        # 全量口径：五项指标
+        for name, metric in metrics.items():
+            tasks.append(score_one(row, name, metric, row.contexts, row.scores))
+        # top-N 口径：仅依赖 context 的指标，且只在确实发生截断（切片数>N）时重跑
+        if context_topk > 0 and len(row.contexts) > context_topk:
+            truncated = row.contexts[:context_topk]
+            for name in CONTEXT_DEPENDENT_METRICS:
+                tasks.append(score_one(row, name, metrics[name], truncated, row.scores_topk, label=f"(top-{context_topk})"))
     await asyncio.gather(*tasks)
+
+    # 未截断的行（切片数<=N）top-N 口径与全量相同，直接复用，省一次重复 LLM 调用。
+    if context_topk > 0:
+        for row in to_eval:
+            if len(row.contexts) <= context_topk:
+                for name in CONTEXT_DEPENDENT_METRICS:
+                    if name in row.scores:
+                        row.scores_topk[name] = row.scores[name]
     print("[step_6] 指标计算完成")
 
 
@@ -376,8 +444,12 @@ def step_7_write_result_csv(rows: list[EvalRow], csv_path: Path = RESULT_CSV_PAT
         writer.writerow(RESULT_COLUMNS)
         for row in rows:
             score_cells = [
-                f"{row.scores[name]:.4f}" if row.scores and name in row.scores else ""
+                f"{row.scores[name]:.4f}" if name in row.scores else ""
                 for name in METRIC_NAMES
+            ]
+            topk_cells = [
+                f"{row.scores_topk[name]:.4f}" if name in row.scores_topk else ""
+                for name in CONTEXT_DEPENDENT_METRICS
             ]
             writer.writerow([
                 row.pair.question,
@@ -385,6 +457,7 @@ def step_7_write_result_csv(rows: list[EvalRow], csv_path: Path = RESULT_CSV_PAT
                 "\n\n".join(row.contexts or []),
                 row.pair.ground_truth,
                 *score_cells,
+                *topk_cells,
             ])
     print(f"[step_7] 结果已写入 {csv_path}（{len(rows)} 行, UTF-8 with BOM）")
 
@@ -397,7 +470,17 @@ async def step_8_main() -> None:
     """
     parser = argparse.ArgumentParser(description="RAGAS 评估：qa.csv -> 查询工作流 -> qa_result.csv")
     parser.add_argument("--library-id", type=int, default=2, help="知识库 ID，默认 2（网络设备资料）")
+    parser.add_argument("--qa-csv", default=str(QA_CSV_PATH),
+                        help="问答数据集 CSV 路径，默认 eval/qa.csv；换库评测时指向对应文件（如 eval/qa_huawei.csv）")
+    parser.add_argument("--result-csv", default=str(RESULT_CSV_PATH),
+                        help="结果 CSV 输出路径，默认 eval/qa_result.csv；不同数据集建议分开写避免互相覆盖")
     parser.add_argument("--top-k", type=int, default=5, help="最终来源数量，默认 5")
+    parser.add_argument("--context-topk", type=int, default=3,
+                        help="额外评估'只取前 N 块 context'的 top-N 口径（0=关闭，仅全量）；默认 3")
+    parser.add_argument("--only", default="",
+                        help="只跑问题中含这些关键字的题（逗号分隔、任一命中即选），用于单点诊断，如 --only 录制视频,打开相机")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="只跑查询链路并打印排序诊断，跳过 ragas 指标计算（省 LLM 调用、快）；不写结果 CSV")
     parser.add_argument("--limit", type=int, default=0, help="只评估前 N 题（0=全量），用于冒烟")
     parser.add_argument("--workers", type=int, default=8, help="ragas 指标内部并发，默认 8")
     parser.add_argument("--preview-chars", type=int, default=300,
@@ -407,10 +490,14 @@ async def step_8_main() -> None:
     args = parser.parse_args()
     preview_chars = 0 if args.full else args.preview_chars
 
-    pairs = step_1_read_qa_pairs()
+    pairs = step_1_read_qa_pairs(Path(args.qa_csv))
     if args.limit > 0:
         pairs = pairs[: args.limit]
         print(f"[step_1] --limit 生效，只评估前 {len(pairs)} 题")
+    if args.only:
+        keys = [k.strip() for k in args.only.split(",") if k.strip()]
+        pairs = [p for p in pairs if any(k in p.question for k in keys)]
+        print(f"[step_1] --only 过滤后剩 {len(pairs)} 题（关键字 {keys}）")
 
     library_config = await step_2_get_library_config(args.library_id)
     llm_wrapper, embeddings_wrapper = step_4_build_wrappers()
@@ -429,8 +516,11 @@ async def step_8_main() -> None:
             print(f"[step_3] 该题链路失败，跳过指标评估: {row.error}")
         rows.append(row)
 
-    await step_6_evaluate_all(rows, metrics)
-    step_7_write_result_csv(rows)
+    if args.no_eval:
+        print("\n[no-eval] 已跳过 ragas 指标计算（未写结果 CSV），仅输出上方逐题排序诊断。")
+        return
+    await step_6_evaluate_all(rows, metrics, context_topk=args.context_topk)
+    step_7_write_result_csv(rows, Path(args.result_csv))
 
     evaluated = [r for r in rows if r.scores]
     print(f"\n===== 汇总：共 {len(rows)} 题，成功评估 {len(evaluated)} 题 =====")
@@ -438,6 +528,18 @@ async def step_8_main() -> None:
         vals = [r.scores[name] for r in evaluated if name in r.scores]
         avg = sum(vals) / len(vals) if vals else float("nan")
         print(f"{name:>20}: mean={avg:.4f} (n={len(vals)})")
+
+    if args.context_topk > 0:
+        print(f"\n----- 全量 vs top-{args.context_topk} 口径对比（只看依赖 context 的指标）-----")
+        print(f"{'metric':>20} {'全量':>10} {'top-N':>10} {'差(全量-topN)':>15}")
+        for name in CONTEXT_DEPENDENT_METRICS:
+            full_vals = [r.scores[name] for r in evaluated if name in r.scores]
+            topk_vals = [r.scores_topk[name] for r in evaluated if name in r.scores_topk]
+            full_avg = sum(full_vals) / len(full_vals) if full_vals else float("nan")
+            topk_avg = sum(topk_vals) / len(topk_vals) if topk_vals else float("nan")
+            print(f"{name:>20} {full_avg:>10.4f} {topk_avg:>10.4f} {full_avg - topk_avg:>+15.4f}")
+        print("  解读：top-N 与全量越接近→答案块本就排在前列（排序好、非堆料）；"
+              "top-N 明显偏低→有用块埋在后面、收窄即掉分，排序仍需治理。")
 
 
 if __name__ == "__main__":

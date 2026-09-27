@@ -52,7 +52,6 @@ _NODE_NAME_TO_CN: Dict[str, str] = {
     "node_web_search_mcp": "网络搜索",
     "node_rrf": "倒排融合",
     "node_rerank": "重排序",
-    "node_source_collection": "汇聚来源",
     "node_answer_output": "生成答案",
     # --- LangGraph 内置终止节点 ---
     "__end__": "处理完成",

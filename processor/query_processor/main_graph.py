@@ -12,7 +12,6 @@ from processor.query_processor.nodes.node_rerank import NodeRerank
 from processor.query_processor.nodes.node_rrf import NodeRrf
 from processor.query_processor.nodes.node_search_embedding import NodeSearchEmbedding
 from processor.query_processor.nodes.node_search_embedding_hyde import NodeSearchEmbeddingHyde
-from processor.query_processor.nodes.node_source_collection import NodeSourceCollection
 from processor.query_processor.nodes.node_web_search_mcp import NodeWebSearchMcp
 from processor.query_processor.state import QueryGraphState
 
@@ -30,7 +29,6 @@ class KBQueryWorkflow:
         self.node_web_search_mcp = NodeWebSearchMcp()
         self.node_rrf = NodeRrf()
         self.node_rerank = NodeRerank()
-        self.node_source_collection = NodeSourceCollection()
         self.node_answer_output = NodeAnswerOutput()
         self._register_nodes()
         self._setup_routes()
@@ -43,7 +41,6 @@ class KBQueryWorkflow:
         self.workflow.add_node("node_web_search_mcp", self.node_web_search_mcp)
         self.workflow.add_node("node_rrf", self.node_rrf)
         self.workflow.add_node("node_rerank", self.node_rerank)
-        self.workflow.add_node("node_source_collection", self.node_source_collection)
         self.workflow.add_node("node_answer_output", self.node_answer_output)
 
     def _setup_routes(self) -> None:
@@ -65,11 +62,10 @@ class KBQueryWorkflow:
         )
         self.workflow.add_edge("node_web_search_mcp", "node_rrf")
         self.workflow.add_edge("node_rrf", "node_rerank")
-        self.workflow.add_edge("node_rerank", "node_source_collection")
-        # 来源整理后没有分支：不管有没有来源都要出答案（无来源时由答案节点给兜底话术）。
-        # 这里原先是一条条件边，但两个分支指向同一个节点、路由函数恒返回同一个值，
-        # 留着只会让人误以为此处能分流（P2-6）。
-        self.workflow.add_edge("node_source_collection", "node_answer_output")
+        # 精排后直接出答案：来源整形已在 node_rerank 出口按 top_k 收口、并由 node_answer_output
+        # 以“进入 prompt 的切片”同源产出；中间的 node_source_collection 因产物被覆盖已是死节点，
+        # 于 Phase3 决策3A 摘除。保持一条普通边：不管有没有来源都要出答案（无来源时答案节点给兑底话术）。
+        self.workflow.add_edge("node_rerank", "node_answer_output")
         self.workflow.add_edge("node_answer_output", END)
 
     @staticmethod

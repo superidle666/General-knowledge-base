@@ -7,9 +7,9 @@
 @BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL；
               白名单外的 markdown 图片（模型臆造的 URL）要从答案正文中剜除，
               否则前端按 markdown 渲染整段答案时会直接展示出裂图。
-              用户端展示的引用来源必须与生成时真正喂进 prompt 的切片同源：上游
-              node_source_collection 的二次裁剪会因为高分噪声块抬高淘汰线而漏掉真正
-              支撑答案的切片，故本节点用"进入 prompt 的切片集合"覆盖 state['sources']。
+              用户端展示的引用来源必须与生成时真正喂进 prompt 的切片同源：若另走一套
+              “按相对淘汰线二次裁剪”的来源整形，高分噪声块抬高淘汰线时会漏掉真正
+              支撑答案的切片，故本节点直接以“进入 prompt 的切片集合”产出 state['sources']。
 """
 
 import re
@@ -149,11 +149,10 @@ class NodeAnswerOutput(NodeBase):
             state.get("reranked_docs") or [], MAX_CONTEXT_CHARS - MAX_HISTORY_CHARS
         )
 
-        # 3.1 引用与生成同源：把用户端 sources 覆盖为模型实际读到的切片集合。
-        # node_source_collection 用相对地板分 + 正文长度对 reranked_docs 做了二次裁剪，
-        # 一旦某个高分但无实质信息的切片（如仅命中型号名的"文档信息"块）抬高了淘汰线，
-        # 真正支撑答案的切片会被挤出引用区，出现"答案正确、来源却查不到依据"的假象。
-        # 展示给用户的来源必须等于生成时喂进去的那份，故在此覆盖。
+        # 3.1 引用与生成同源：用户端 sources 直接等于模型实际读到的切片集合。
+        # 曾因“另一套按相对地板分+正文长度二次裁剪”的来源整形会在高分噪声块
+        # 抬高淘汰线时，把真正支撑答案的切片挤出引用区（答案对、来源却查不到依据）；
+        # 该整形节点 node_source_collection 已于 Phase3 决策3A 摘除，来源统一在此产出。
         state["sources"] = self._step_2b_generation_sources(state, used_docs)
 
         # 4. 格式化 Item Names (提问商品)

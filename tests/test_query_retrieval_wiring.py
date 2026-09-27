@@ -22,7 +22,6 @@ from graph_introspection import (
     state_key_writes,
     typed_dict_keys,
 )
-from processor.query_processor.nodes.node_source_collection import NodeSourceCollection
 from processor.query_processor.nodes.node_web_search_mcp import NodeWebSearchMcp
 from processor.query_processor.retrieval_common import (
     ITEM_NAME_FILTER_FIELD,
@@ -274,101 +273,10 @@ def test_web_search_is_skipped_without_question() -> None:
 
 
 # --------------------------------------------------------------------------
-# 五、来源整理：本地与联网两套阈值、统一 top_k
+# 五、来源整理：已随死节点 node_source_collection 一同摘除（Phase3 决策3A）。
+# 该节点的产物在 node_answer_output._build_prompt 中被覆盖、无消费方，故这些“测这个死节点”的
+# 用例不再保留；来源条数的最终收口改由 node_rerank 出口的 clamp(top_k,..) 负责（见 test_rrf_score_fallback）。
 # --------------------------------------------------------------------------
-
-def _rerank_doc(content: str, source: str, score: float) -> dict:
-    return {"content": content, "source": source, "score": score, "chunk_id": None, "url": None, "title": "T"}
-
-
-def test_short_web_snippets_are_not_dropped_by_local_threshold() -> None:
-    """60 字阈值是为本地碎片设计的；联网摘要普遍更短，共用会把外部来源全静默丢掉。"""
-    web_doc = _rerank_doc("联网摘要" * 6, "web", 0.9)
-    local_doc = _rerank_doc("本地碎片太短", "local", 0.9)
-    state = {"reranked_docs": [web_doc, local_doc], "top_k": 5}
-    sources = NodeSourceCollection().process(state)["sources"]
-    assert [item["source"] for item in sources] == ["web"]
-
-
-def test_sources_respect_top_k_and_rerank_threshold() -> None:
-    docs = [_rerank_doc("足够长的本地知识库正文" * 6, "local", 0.9 - index * 0.01) for index in range(5)]
-    docs.append(_rerank_doc("低于阈值的正文内容" * 10, "local", 0.2))
-    state = {"reranked_docs": docs, "top_k": 3}
-    sources = NodeSourceCollection().process(state)["sources"]
-    assert len(sources) == 3
-    assert all(item["score"] >= 0.5 for item in sources)
-
-
-def test_rerank_failure_falls_back_to_recall_order() -> None:
-    """精排服务挂了时用向量分数继续出来源，比空结果更有用，但不能再去卡相关性阈值。"""
-    docs = [{"content": "本地知识库正文内容" * 10, "source": "local", "chunk_id": 1, "vector_score": 0.31}]
-    state = {"reranked_docs": docs, "rerank_failed": True, "top_k": 5}
-    sources = NodeSourceCollection().process(state)["sources"]
-    assert len(sources) == 1
-    assert sources[0]["score"] == 0.31
-
-
-def _long_doc(source: str, score: float, index: int) -> dict:
-    return _rerank_doc(f"{source} 正文内容片段" * 8, source, score - index * 0.01)
-
-
-def test_local_sources_keep_reserved_slots_when_web_outranks_them() -> None:
-    """联网摘要句子完整，Cross-Encoder 打分普遍高于本地碎片；本地不保底就会“开了联网看不到自己资料”。"""
-    docs = [_long_doc("web", 0.95, index) for index in range(5)]
-    docs += [_long_doc("local", 0.70, index) for index in range(5)]
-    sources = NodeSourceCollection().process({"reranked_docs": docs, "top_k": 5})["sources"]
-
-    assert len(sources) == 5, "来源总数不得超出 top_k"
-    local_count = sum(1 for item in sources if item["source"] == "local")
-    assert local_count == 3, "ceil(5 * 0.6) = 3 个本地保底槽位未生效"
-    # 保底只影响谁入选，不影响展示顺序：仍然按分数降序
-    assert [item["score"] for item in sources] == sorted((item["score"] for item in sources), reverse=True)
-
-
-def test_local_quota_never_pads_with_unqualified_local_sources() -> None:
-    """保底是“有合格结果时不被挤出”，不是硬性比例；本地全低于阈值时不得为了凑数把它塞进来。"""
-    docs = [_long_doc("web", 0.80, index) for index in range(5)]
-    docs.append(_long_doc("local", 0.20, 0))
-    sources = NodeSourceCollection().process({"reranked_docs": docs, "top_k": 5})["sources"]
-
-    assert len(sources) == 5
-    assert {item["source"] for item in sources} == {"web"}
-
-
-def test_local_sources_can_fill_slots_left_by_web() -> None:
-    """联网结果不足时本地继续补位：配额不能反过来减少总来源数。"""
-    docs = [_long_doc("local", 0.70, index) for index in range(5)]
-    docs.append(_long_doc("web", 0.90, 0))
-    sources = NodeSourceCollection().process({"reranked_docs": docs, "top_k": 5})["sources"]
-
-    assert len(sources) == 5
-    assert sum(1 for item in sources if item["source"] == "local") == 4
-
-
-def test_relevant_local_doc_survives_a_lower_absolute_score() -> None:
-    """实测场景：本地“## 调节色彩”对“打印机怎么调整对比度”只拿 0.44，但它是真答案。
-
-    只要本地还沿用联网那把 0.5 绝对尺子，这类“内容对但篇幅短”的切片会在源头就被判死；
-    所以本地阈值必须按自己组内高低算，而不是跟网页摘要拼绝对分。
-    """
-    docs = [_long_doc("web", 0.75, index) for index in range(5)]
-    docs.append(_long_doc("local", 0.44, 0))
-    sources = NodeSourceCollection().process({"reranked_docs": docs, "top_k": 5})["sources"]
-
-    assert [item["source"] for item in sources].count("local") == 1
-    assert min(item["score"] for item in sources) < 0.5, "本地唯一相关切片被绝对阈值误杀了"
-
-
-def test_local_group_is_cut_by_its_own_relative_score() -> None:
-    """本地不能为了凑数把无关碎片也带进来：远低于本组最高分的切片仍要被剔除。"""
-    docs = [_long_doc("web", 0.80, index) for index in range(5)]
-    docs.append(_long_doc("local", 0.46, 0))   # 本组最高分 → 相对线 0.46*0.8=0.368
-    docs.append(_long_doc("local", 0.39, 5))   # 得分 0.34：高于地板分 0.3，但低于本组相对线 0.368
-    sources = NodeSourceCollection().process({"reranked_docs": docs, "top_k": 5})["sources"]
-
-    local_scores = [item["score"] for item in sources if item["source"] == "local"]
-    assert len(local_scores) == 1
-    assert round(local_scores[0], 2) == 0.46
 
 
 # --------------------------------------------------------------------------

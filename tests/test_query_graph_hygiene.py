@@ -24,7 +24,6 @@ from processor.query_processor.main_graph import get_kb_query_workflow
 from processor.query_processor.nodes import node_search_embedding_hyde as hyde_module
 from processor.query_processor.nodes.node_answer_output import NodeAnswerOutput
 from processor.query_processor.nodes.node_search_embedding_hyde import NodeSearchEmbeddingHyde
-from processor.query_processor.nodes.node_source_collection import NodeSourceCollection
 from processor.query_processor.nodes.node_web_search_mcp import NodeWebSearchMcp
 
 HYDE_NODE = PROJECT_ROOT / "processor" / "query_processor" / "nodes" / "node_search_embedding_hyde.py"
@@ -42,10 +41,6 @@ def _long_doc(source: str, score: float, index: int = 0) -> dict:
         "url": None if source == "local" else "https://a.test",
         "title": "T",
     }
-
-
-def _sources(state_docs: list[dict], top_k: int) -> list[dict]:
-    return NodeSourceCollection().process({"reranked_docs": state_docs, "top_k": top_k})["sources"]
 
 
 # ---------------------------------------------------------------- P2-4 取值加固
@@ -185,11 +180,16 @@ def _plain_edges(path: Path) -> set[tuple[str, str]]:
     return edges
 
 
-def test_source_collection_flows_to_answer_without_a_branch() -> None:
-    """两个分支指向同一个节点的条件边是死分支：它不分流，只是让人误以为这里能分流。"""
+def test_rerank_flows_to_answer_without_a_branch() -> None:
+    """精排后一条普通边直连答案节点：不分流；死节点 node_source_collection 已从图摘除（Phase3 决策3A）。
+
+    它产物被 node_answer_output 覆盖、无消费方，故从图移除；这里把它的端点“不得复活”钉住（
+    只查边、不查文本，因为注释里会提到这个名字）。合法短引用现在统一由生成同源口径产出。
+    """
+    edges = _plain_edges(QUERY_MAIN_GRAPH)
+    assert ("node_rerank", "node_answer_output") in edges
+    assert "node_source_collection" not in {n for edge in edges for n in edge}, "已摘除的死节点又被接回图里"
     assert "node_source_collection" not in conditional_edge_targets(QUERY_MAIN_GRAPH)
-    assert ("node_source_collection", "node_answer_output") in _plain_edges(QUERY_MAIN_GRAPH)
-    assert "_route_after_sources" not in QUERY_MAIN_GRAPH.read_text(encoding="utf-8")
 
 
 def test_every_query_router_can_actually_choose_between_targets() -> None:
@@ -201,48 +201,6 @@ def test_every_query_router_can_actually_choose_between_targets() -> None:
         router = router_expression.split(".")[-1]
         options = literal_string_returns(QUERY_MAIN_GRAPH, router)
         assert len(options) > 1, f"{source} 的路由 {router} 只有单一出口 {options or '（没有字面量返回值）'}"
-
-
-# ---------------------------------------------------------------- P2-7 配额回填
-
-
-def test_backfill_stays_inside_available_local_candidates() -> None:
-    """联网只给 1 条时本地补位，但候选不够也不能越界取：补位是"有多少补多少"。"""
-    docs = [_long_doc("local", 0.70, 0), _long_doc("local", 0.69, 1), _long_doc("web", 0.90, 0)]
-    sources = _sources(docs, top_k=5)
-
-    assert len(sources) == 3, "来源总数应等于合格候选数，不得被补位算式凭空放大"
-    assert sum(1 for item in sources if item["source"] == "local") == 2
-
-
-def test_backfill_never_cuts_already_selected_local_sources() -> None:
-    """remaining 为 0 时不能反向削本地：ceil(5*0.6)=3 个保底槽位必须守住。"""
-    docs = [_long_doc("local", 0.70, index) for index in range(3)]
-    docs += [_long_doc("web", 0.90, index) for index in range(4)]
-    sources = _sources(docs, top_k=5)
-
-    assert len(sources) == 5
-    assert sum(1 for item in sources if item["source"] == "local") == 3
-    assert sum(1 for item in sources if item["source"] == "web") == 2
-
-
-def test_local_fills_every_slot_left_by_web() -> None:
-    """本地候选充足、联网为空时，本地可以突破保底比例占满 top_k。"""
-    docs = [_long_doc("local", 0.70, index) for index in range(5)]
-    sources = _sources(docs, top_k=5)
-
-    assert len(sources) == 5
-    assert {item["source"] for item in sources} == {"local"}
-
-
-def test_backfill_cannot_push_total_over_top_k() -> None:
-    """补位量必须是“top_k 减去两路已选”，忘了减已选本地就会把总数顶穿 top_k。"""
-    docs = [_long_doc("local", 0.70, index) for index in range(5)]
-    docs += [_long_doc("web", 0.90, index) for index in range(5)]
-    sources = _sources(docs, top_k=5)
-
-    assert len(sources) == 5, "来源总数不能超过 top_k（联网已填窗口时不该再补）"
-    assert sum(1 for item in sources if item["source"] == "local") == 3
 
 
 # ---------------------------------------------------------------- P2-10 图缓存

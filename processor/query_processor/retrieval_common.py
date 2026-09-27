@@ -14,11 +14,17 @@ from typing import Any
 from utils.milvus_utils import escape_milvus_string
 
 # 来源回填、图片关联和引用溯源都依赖这些字段；新增字段要先确认导入侧确实写入
+#
+# image_sources / image_metadata 不在此列：查询/生成期的图片回链完全走 content 里的
+# Markdown ![](url)（见 node_answer_output._extract_images_from_docs），没有任何读取方依赖
+# 这两个 Milvus 列；把它们列入输出只会让每条命中多拽回最多 65535 字节的 JSON。列本身仍在
+# schema 里作溯源预留，要用时放回此白名单即可，无需重建集合。管理端展示的图片来自
+# node_persist_chunks 写入的归档副本，与本输出字段无关。
 RETRIEVAL_OUTPUT_FIELDS: tuple[str, ...] = (
     "chunk_id", "knowledge_base_id", "document_id", "document_version",
     "chunk_index", "content", "title", "parent_title", "file_name",
     "file_title", "source_page", "item_name", "entity_recognition_mode",
-    "chunk_type", "source_kind", "image_sources", "image_metadata",
+    "chunk_type", "source_kind",
 )
 
 # 库隔离字段：v2 集合按知识库 ID 分区过滤，缺少它等于跨库检索
