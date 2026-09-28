@@ -1,0 +1,126 @@
+/**
+ * 设计令牌单一来源（light/dark 两组语义变量）。
+ *
+ * 规则：
+ * 1. 颜色只允许通过 var(--token) 引用，禁止在组件里新增硬编码 hex。
+ * 2. 暗色只覆盖变量值，不再出现类似 `.admin-shell.is-dark .panel` 的逐条覆盖。
+ * 3. 作用域：:root 提供浅色默认值；:where(.is-dark) 提供暗色覆盖
+ *    （:where 零特异性，任何组件样式都能在同层覆盖单个值）。
+ *    .admin-shell / .user-shell 切换 is-dark 类即整体换肤。
+ */
+:root {
+  /* 基础面 */
+  --bg: #f7f8fa;
+  --surface: #fff;
+  --surface-soft: #f1f4f8;
+  --border: #e5e7eb;
+  --line-strong: #e5e7eb;
+  --surface-alt: #f8fafc;
+  --code-bg: #e9eef5;
+
+  /* 文本 */
+  --text: #1f2937;
+  --text-soft: #374151;
+  --muted: #6b7280;
+  --weak: #9ca3af;
+
+  /* 主色 */
+  --primary: #2563eb;
+  --primary-deep: #1d4ed8;
+  --primary-weak: #eff6ff;
+  --primary-border: #bfdbfe;
+  --primary-border-strong: #93c5fd;
+  --primary-soft: #dbeafe;
+
+  /* 成功 */
+  --success: #15803d;
+  --success-strong: #22c55e;
+  --success-bg: #f0fdf4;
+  --success-border: #bbf7d0;
+  --success-weak: #dcfce7;
+
+  /* 危险 */
+  --danger: #dc2626;
+  --danger-deep: #b91c1c;
+  --danger-bg: #fef2f2;
+  --danger-border: #fecaca;
+
+  /* 警告 */
+  --warning: #b45309;
+  --warning-strong: #d97706;
+
+  /* 强调色（统计图标 / 图表 / 徽标） */
+  --on-primary: #fff;
+  --accent-indigo: #4338ca;
+  --accent-indigo-bg: #eef2ff;
+  --accent-green: #0f9d78;
+  --accent-green-deep: #047857;
+  --accent-green-bg: #ecfdf5;
+  --accent-amber: #c47f1d;
+  --accent-amber-bg: #fffbeb;
+  --accent-purple: #7c3aed;
+  --accent-purple-bg: #f5f3ff;
+
+  /* 遮罩与投影 */
+  --overlay: rgb(15 23 42 / 35%);
+  --shadow-pop: 0 8px 18px rgb(15 23 42 / 14%);
+  --shadow-soft: 0 2px 8px rgb(15 23 42 / 4%);
+  --shadow-card: 0 12px 35px rgb(15 23 42 / 7%);
+  --shadow-side: 8px 0 24px rgb(15 23 42 / 12%);
+  --shadow-glow: 0 8px 20px rgb(37 99 235 / 12%);
+}
+
+:where(.is-dark) {
+  color-scheme: dark;
+  --bg: #111827;
+  --surface: #1f2937;
+  --surface-soft: #273449;
+  --border: #374151;
+  --line-strong: #374151;
+  --surface-alt: #273449;
+  --code-bg: #273449;
+
+  --text: #f3f4f6;
+  --text-soft: #e5e7eb;
+  --muted: #9ca3af;
+  --weak: #9ca3af;
+
+  --primary: #5b8def;
+  --primary-deep: #93c5fd;
+  --primary-weak: rgb(91 141 239 / 12%);
+  --primary-border: rgb(91 141 239 / 40%);
+  --primary-border-strong: rgb(91 141 239 / 60%);
+  --primary-soft: rgb(91 141 239 / 20%);
+
+  --success: #4ade80;
+  --success-strong: #22c55e;
+  --success-bg: rgb(74 222 128 / 10%);
+  --success-border: rgb(74 222 128 / 40%);
+  --success-weak: rgb(74 222 128 / 14%);
+
+  --danger: #f87171;
+  --danger-deep: #fca5a5;
+  --danger-bg: rgb(248 113 113 / 10%);
+  --danger-border: rgb(248 113 113 / 40%);
+
+  --warning: #fbbf24;
+  --warning-strong: #fbbf24;
+
+  --on-primary: #fff;
+  --accent-indigo: #a5b4fc;
+  --accent-indigo-bg: rgb(129 140 248 / 15%);
+  --accent-green: #34d399;
+  --accent-green-deep: #6ee7b7;
+  --accent-green-bg: rgb(52 211 153 / 12%);
+  --accent-amber: #fbbf24;
+  --accent-amber-bg: rgb(251 191 36 / 12%);
+  --accent-purple: #c4b5fd;
+  --accent-purple-bg: rgb(196 181 253 / 12%);
+
+  --overlay: rgb(15 23 42 / 55%);
+  --shadow-pop: 0 8px 18px rgb(0 0 0 / 40%);
+  --shadow-soft: 0 2px 8px rgb(0 0 0 / 30%);
+  --shadow-card: 0 12px 35px rgb(0 0 0 / 45%);
+  --shadow-side: 8px 0 24px rgb(0 0 0 / 50%);
+  --shadow-glow: 0 8px 20px rgb(91 141 239 / 25%);
+}

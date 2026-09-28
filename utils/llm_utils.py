@@ -1,9 +1,7 @@
 """
 大语言模型客户端工具。
-
-@FilePath: utils/llm_utils.py
-@Date: 2026-09-07
-@Description: 按模型和输出模式缓存 ChatOpenAI 客户端，避免重复初始化连接。
+utils/llm_utils.py
+按模型和输出模式缓存 ChatOpenAI 客户端，避免重复初始化连接。
 """
 
 from langchain_openai import ChatOpenAI

@@ -26,11 +26,15 @@ export function useUserQuery() {
     currentQuery.value = payload.query
 
     try {
-      const result = await queryKnowledgeBaseStream(payload, {
-        onDelta: (delta) => {
-          if (isCurrentRequest(requestId, controller)) onDelta?.(delta)
+      const result = await queryKnowledgeBaseStream(
+        payload,
+        {
+          onDelta: (delta) => {
+            if (isCurrentRequest(requestId, controller)) onDelta?.(delta)
+          },
         },
-      }, controller.signal)
+        controller.signal,
+      )
       if (!isCurrentRequest(requestId, controller)) return null
       answer.value = result.answer
       sources.value = result.sources

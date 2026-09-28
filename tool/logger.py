@@ -1,10 +1,8 @@
 """
 项目日志配置。
-
-@FilePath: tool/logger.py
-@Date: 2026-09-07
-@Description: 提供项目统一的彩色控制台日志格式，并暴露问答侧共用的 logger 句柄。
-@BusinessRule: 日志处理器只由进程入口（API、导入 Worker、节点 __main__ 脚本）显式
+tool/logger.py
+提供项目统一的彩色控制台日志格式，并暴露问答侧共用的 logger 句柄。
+日志处理器只由进程入口（API、导入 Worker、节点 __main__ 脚本）显式
               挂载，模块导入期绝不改动根日志器——此前这里在 import 期 clear() 根
               处理器并挂上自己的 handler，与导入侧 setup_logging 互相覆盖，
               "谁最后 import 谁赢"，是日志格式随机、问答侧看到导入侧 handler 的根因。

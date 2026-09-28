@@ -1,9 +1,7 @@
 """
 PDF 转 Markdown 节点。
-
-@FilePath: processor/import_processor/nodes/node_pdf_to_md.py
-@Date: 2026-09-07
-@Description: 调用文档解析服务将 PDF 转换为结构化 Markdown，并整理导入中间文件。
+processor/import_processor/nodes/node_pdf_to_md.py
+调用文档解析服务将 PDF 转换为结构化 Markdown，并整理导入中间文件。
 """
 import json
 import logging

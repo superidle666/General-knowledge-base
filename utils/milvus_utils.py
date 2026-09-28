@@ -1,9 +1,7 @@
 """
 Milvus 检索工具。
-
-@FilePath: utils/milvus_utils.py
-@Date: 2026-09-07
-@Description: 提供 Milvus 客户端单例、过滤表达式转义和混合检索请求构造能力。
+utils/milvus_utils.py
+提供 Milvus 客户端单例、过滤表达式转义和混合检索请求构造能力。
 """
 
 from pymilvus import MilvusClient, AnnSearchRequest, WeightedRanker

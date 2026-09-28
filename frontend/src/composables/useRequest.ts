@@ -9,10 +9,7 @@ export type UseRequestOptions<P> = {
   initialParams?: P
 }
 
-export function useRequest<T, P = void>(
-  executor: RequestExecutor<T, P>,
-  options: UseRequestOptions<P> = {},
-) {
+export function useRequest<T, P = void>(executor: RequestExecutor<T, P>, options: UseRequestOptions<P> = {}) {
   const data = ref<T>()
   const loading = ref(false)
   const error = ref<Error | null>(null)
@@ -21,7 +18,7 @@ export function useRequest<T, P = void>(
     loading.value = true
     error.value = null
     try {
-      const result = await executor(params === undefined ? options.initialParams as P : params)
+      const result = await executor(params === undefined ? (options.initialParams as P) : params)
       data.value = result
       return result
     } catch (cause) {
@@ -38,7 +35,9 @@ export function useRequest<T, P = void>(
     error.value = null
   }
 
-  if (options.immediate) void execute()
+  // immediate 首载失败已经写入 error 状态由模板展示，吞掉 rejection 避免未捕获报错；
+  // 调用方主动 execute 时仍正常抛出，便于页面用 try/catch 做失败分支处理。
+  if (options.immediate) void execute().catch(() => {})
 
   return { data, loading, error, execute, reset }
 }

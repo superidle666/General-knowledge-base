@@ -1,6 +1,7 @@
 /** 用户端知识库列表、连续会话、历史消息和流式问答接口。 */
 
 import request from '../utils/request'
+import { getErrorMessage } from '../utils/error'
 import { authenticatedFetch } from './auth'
 
 export type QueryRequest = {
@@ -12,6 +13,9 @@ export type QueryRequest = {
   use_web_search?: boolean
 }
 
+/** 分数口径枚举（与后端 schemas.py 约定对齐）：rerank=交叉编码器相关性；recall=精排降级后的召回序投影分。 */
+export type SourceScoreKind = 'rerank' | 'recall'
+
 export type QuerySource = {
   chunk_id: string | number | null
   document_id: number | null
@@ -22,8 +26,9 @@ export type QuerySource = {
   parent_title: string | null
   content: string
   score: number | null
-  // rerank=交叉编码器相关性（可展示为百分比）；recall=精排降级后的召回序分（不代表置信度）
-  score_kind: string
+  // rerank=交叉编码器相关性（可展示为百分比）；recall=精排降级后的召回序分（不代表置信度）；
+  // 缺省按 rerank 处理（与后端默认值一致），可选字段兼容旧历史消息数据
+  score_kind?: SourceScoreKind
   source: string
   url: string | null
   site_name: string | null
@@ -74,7 +79,7 @@ export function listQueryLibraries() {
   return request<QueryLibrary[]>('/api/v1/query/libraries')
 }
 
-export function createQuerySession(libraryId: number, title = "新建技术咨询") {
+export function createQuerySession(libraryId: number, title = '新建技术咨询') {
   return request<QuerySession>('/api/v1/query/sessions', {
     method: 'POST',
     body: JSON.stringify({ library_id: libraryId, title }),
@@ -113,14 +118,13 @@ type QueryStreamCallbacks = {
   onDelta?: (delta: string) => void
 }
 
-function getErrorMessage(body: unknown, fallback: string) {
-  if (!body || typeof body !== 'object' || !('detail' in body)) return fallback
-  return typeof body.detail === 'string' ? body.detail : fallback
-}
-
 function parseSseEvent(block: string) {
   const lines = block.split(/\r?\n/)
-  const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim() || 'message'
+  const event =
+    lines
+      .find((line) => line.startsWith('event:'))
+      ?.slice(6)
+      .trim() || 'message'
   const data = lines
     .filter((line) => line.startsWith('data:'))
     .map((line) => line.slice(5).trimStart())

@@ -1,9 +1,7 @@
 """
 文本重排序服务工具。
-
-@FilePath: utils/reranker_http_utils.py
-@Date: 2026-09-07
-@Description: 调用外部重排序模型，为召回文档生成相关性分数。
+utils/reranker_http_utils.py
+调用外部重排序模型，为召回文档生成相关性分数。
 """
 
 import math

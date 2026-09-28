@@ -1,9 +1,7 @@
 """
 文档导入入口节点。
-
-@FilePath: processor/import_processor/nodes/node_entry.py
-@Date: 2026-09-07
-@Description: 校验导入文件并初始化 PDF、Markdown 处理流程所需的状态字段。
+processor/import_processor/nodes/node_entry.py
+校验导入文件并初始化 PDF、Markdown 处理流程所需的状态字段。
 """
 import json
 import logging

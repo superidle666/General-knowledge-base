@@ -28,7 +28,9 @@ const filteredTags = computed(() => {
   return tags.value.filter((tag) => tag.name.toLowerCase().includes(query))
 })
 
-const visibleTags = computed(() => filteredTags.value.slice((tagPage.value - 1) * tagPageSize.value, tagPage.value * tagPageSize.value))
+const visibleTags = computed(() =>
+  filteredTags.value.slice((tagPage.value - 1) * tagPageSize.value, tagPage.value * tagPageSize.value),
+)
 
 function handleTagPageChange(pageInfo: { current: number; pageSize: number }) {
   tagPage.value = pageInfo.current
@@ -119,19 +121,26 @@ async function deleteTag(tag: Tag) {
   }
 }
 
-watch([search, filteredTags], () => {
-  tagPage.value = 1
-}, { deep: true })
-
-watch(() => props.visible, (visible) => {
-  if (visible) {
-    search.value = ''
+watch(
+  [search, filteredTags],
+  () => {
     tagPage.value = 1
-    cancelEdit()
-    errorMessage.value = ''
-    void loadTags()
-  }
-})
+  },
+  { deep: true },
+)
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (visible) {
+      search.value = ''
+      tagPage.value = 1
+      cancelEdit()
+      errorMessage.value = ''
+      void loadTags()
+    }
+  },
+)
 </script>
 
 <template>
@@ -161,7 +170,9 @@ watch(() => props.visible, (visible) => {
         <t-tag v-else variant="light-outline">{{ tag.name }}</t-tag>
         <div class="tag-manager-actions">
           <template v-if="editingId === tag.id">
-            <t-button variant="text" class="edit-action" size="small" :loading="saving" @click="saveEdit">保存</t-button>
+            <t-button variant="text" class="edit-action" size="small" :loading="saving" @click="saveEdit"
+              >保存</t-button
+            >
             <t-button variant="text" size="small" @click="cancelEdit">取消</t-button>
           </template>
           <template v-else>
@@ -173,7 +184,8 @@ watch(() => props.visible, (visible) => {
               :loading="deletingId === tag.id"
               :disabled="Boolean(deletingId) && deletingId !== tag.id"
               @click="deleteTag(tag)"
-            >删除</t-button>
+              >删除</t-button
+            >
           </template>
         </div>
       </div>
@@ -192,15 +204,66 @@ watch(() => props.visible, (visible) => {
 </template>
 
 <style scoped>
-.tag-create-row { display: flex; gap: 10px; margin-bottom: 14px; }
-.tag-create-row .t-input { min-width: 0; flex: 1; }
-.tag-search-input { margin-bottom: 14px; }
-.tag-manager-list { display: grid; gap: 8px; max-height: min(48vh, 420px); overflow-y: auto; padding: 2px; }
-.tag-manager-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 40px; padding: 10px 12px; border-bottom: 1px solid #f1f5f9; }
-.tag-manager-item:last-child { border-bottom: 0; }
-.tag-manager-actions { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
-.tag-edit-input { min-width: 0; flex: 1; }
-.empty-state { color: #9ca3af; font-size: 12px; }
-.dialog-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }
-@media (max-width: 560px) { .dialog-pagination { align-items: flex-start; flex-direction: column; } }
+.tag-create-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.tag-create-row .t-input {
+  min-width: 0;
+  flex: 1;
+}
+.tag-search-input {
+  margin-bottom: 14px;
+}
+.tag-manager-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  padding: 2px;
+}
+.tag-manager-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--surface-soft);
+}
+.tag-manager-item:last-child {
+  border-bottom: 0;
+}
+.tag-manager-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+.tag-edit-input {
+  min-width: 0;
+  flex: 1;
+}
+.empty-state {
+  color: var(--weak);
+  font-size: 12px;
+}
+.dialog-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+@media (max-width: 560px) {
+  .dialog-pagination {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
 </style>

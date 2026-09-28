@@ -16,12 +16,17 @@ const drafts = ref<Record<string, string>>({})
 const savingKey = ref('')
 const successMessage = ref('')
 const saveError = ref('')
-const settingsRequest = useRequest(async () => {
-  const result = await mysqlApi.listSettings()
-  settings.value = result
-  drafts.value = Object.fromEntries(result.filter((item) => !item.is_sensitive).map((item) => [item.key, item.value || '']))
-  return result
-}, { immediate: true })
+const settingsRequest = useRequest(
+  async () => {
+    const result = await mysqlApi.listSettings()
+    settings.value = result
+    drafts.value = Object.fromEntries(
+      result.filter((item) => !item.is_sensitive).map((item) => [item.key, item.value || '']),
+    )
+    return result
+  },
+  { immediate: true },
+)
 const loading = settingsRequest.loading
 const errorMessage = computed(() => saveError.value || settingsRequest.error.value?.message || '')
 
@@ -33,9 +38,15 @@ const categoryNames: Record<string, string> = {
   site: '站点信息',
 }
 const categoryOrder = ['model', 'embedding', 'vector', 'document', 'site']
-const groups = computed(() => categoryOrder
-  .map((category) => ({ category, name: categoryNames[category], items: settings.value.filter((item) => item.category === category) }))
-  .filter((group) => group.items.length))
+const groups = computed(() =>
+  categoryOrder
+    .map((category) => ({
+      category,
+      name: categoryNames[category],
+      items: settings.value.filter((item) => item.category === category),
+    }))
+    .filter((group) => group.items.length),
+)
 
 // NOTE: 敏感值即使后端存在，也只在本次输入期间显示，避免二次渲染泄露明文。
 function displayValue(item: SystemSetting) {
@@ -57,7 +68,7 @@ async function saveSetting(item: SystemSetting) {
   successMessage.value = ''
   try {
     const updated = await mysqlApi.updateSetting(item.key, drafts.value[item.key] ?? '')
-    settings.value = settings.value.map((setting) => setting.key === updated.key ? updated : setting)
+    settings.value = settings.value.map((setting) => (setting.key === updated.key ? updated : setting))
     if (!item.is_sensitive) drafts.value[item.key] = updated.value || ''
     if (item.is_sensitive) drafts.value[item.key] = ''
     successMessage.value = item.is_sensitive ? '敏感配置已安全更新' : '配置已保存'
@@ -67,7 +78,6 @@ async function saveSetting(item: SystemSetting) {
     savingKey.value = ''
   }
 }
-
 </script>
 
 <template>
@@ -103,11 +113,13 @@ async function saveSetting(item: SystemSetting) {
             <t-input
               :model-value="displayValue(item)"
               :type="item.is_sensitive ? 'password' : 'text'"
-              :placeholder="item.is_sensitive ? (item.masked_value || '请输入新的值') : '请输入配置值'"
+              :placeholder="item.is_sensitive ? item.masked_value || '请输入新的值' : '请输入配置值'"
               :clearable="!item.is_sensitive"
-              @update:model-value="(value: unknown) => drafts[item.key] = String(value || '')"
+              @update:model-value="(value: unknown) => (drafts[item.key] = String(value || ''))"
             />
-            <t-button theme="primary" size="small" :loading="savingKey === item.key" @click="saveSetting(item)">保存</t-button>
+            <t-button theme="primary" size="small" :loading="savingKey === item.key" @click="saveSetting(item)"
+              >保存</t-button
+            >
           </div>
         </div>
       </section>
@@ -116,13 +128,52 @@ async function saveSetting(item: SystemSetting) {
 </template>
 
 <style scoped>
-.settings-runtime { grid-template-columns: minmax(0, 1fr); align-items: start; gap: 16px; }
-.settings-runtime .settings-panel { padding: 20px; }
-.settings-runtime .settings-panel h2 { margin: 0; padding-bottom: 16px; }
-.setting-edit-row { min-height: 0; padding: 16px 0; gap: 20px; }
-.setting-copy { min-width: 0; }
-.setting-editor { width: min(100%, 360px); display: flex; align-items: center; gap: 8px; }
-.setting-editor :deep(.t-input) { flex: 1; min-width: 0; }
-.settings-success { color: #166534; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 5px; padding: 9px 12px; margin-bottom: 16px; font-size: 12px; }
-@media (max-width: 760px) { .setting-edit-row { align-items: flex-start; flex-direction: column; }.setting-editor { width: 100%; } }
+.settings-runtime {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
+}
+.settings-runtime .settings-panel {
+  padding: 20px;
+}
+.settings-runtime .settings-panel h2 {
+  margin: 0;
+  padding-bottom: 16px;
+}
+.setting-edit-row {
+  min-height: 0;
+  padding: 16px 0;
+  gap: 20px;
+}
+.setting-copy {
+  min-width: 0;
+}
+.setting-editor {
+  width: min(100%, 360px);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.setting-editor :deep(.t-input) {
+  flex: 1;
+  min-width: 0;
+}
+.settings-success {
+  color: var(--success);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: 5px;
+  padding: 9px 12px;
+  margin-bottom: 16px;
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .setting-edit-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .setting-editor {
+    width: 100%;
+  }
+}
 </style>

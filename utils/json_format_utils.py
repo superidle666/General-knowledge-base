@@ -1,9 +1,9 @@
 """
 JSON 序列化工具。
 
-@FilePath: utils/json_format_utils.py
-@Date: 2026-09-07
-@Description: 将 MongoDB、时间、Decimal 和 UUID 等特殊类型转换为可传输的 JSON 数据。
+utils/json_format_utils.py
+
+将 MongoDB、时间、Decimal 和 UUID 等特殊类型转换为可传输的 JSON 数据。
 """
 from bson import ObjectId
 import json

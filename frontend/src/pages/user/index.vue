@@ -8,33 +8,54 @@ import UserSidebar from '../../components/user/UserSidebar.vue'
 import UserTopbar from '../../components/user/UserTopbar.vue'
 import UserChatPanel from '../../components/user/UserChatPanel.vue'
 import UserSourcePanel from '../../components/user/UserSourcePanel.vue'
-import { createQuerySession, deleteQuerySession, getQuerySessionMessages, listQueryLibraries, listQuerySessions, renameQuerySession, type QueryLibrary, type QuerySession } from '../../api/query'
+import {
+  createQuerySession,
+  deleteQuerySession,
+  getQuerySessionMessages,
+  listQueryLibraries,
+  listQuerySessions,
+  renameQuerySession,
+  type QueryLibrary,
+  type QuerySession,
+} from '../../api/query'
+import { useQueryContext } from '../../composables/useQueryContext'
 import { useUserQuery } from '../../composables/useUserQuery'
+import { STORAGE_KEY } from '../../constants'
 import { useUserStore } from '../../store/modules/user'
 import type { QueryChatMessage, UserConversation, UserLibrary, UserMessage, UserSource } from '../../types/user'
+import { normalizeSources } from '../../utils/sources'
 
 const ANONYMOUS_QUERY_LIMIT = 3
-const ANONYMOUS_QUERY_COUNT_KEY = 'kb-user-anonymous-query-count'
+const ANONYMOUS_QUERY_COUNT_KEY = STORAGE_KEY.USER_ANONYMOUS_QUERY_COUNT
+// 首次进入未选择知识库时默认展示的知识库名称
+const DEFAULT_LIBRARY_NAME = '个人知识总结'
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 const { isLoggedIn, userInfo } = storeToRefs(userStore)
-const darkMode = ref(false)
+const darkMode = ref(window.localStorage.getItem(STORAGE_KEY.USER_DARK_MODE) === 'true')
 const mobileSidebarOpen = ref(false)
-const sourcePanelOpen = ref(true)
+const sidebarCollapsed = ref(window.localStorage.getItem(STORAGE_KEY.USER_SIDEBAR_COLLAPSED) === 'true')
+const sourcePanelOpen = ref(false)
 const searchQuery = ref('')
 const activeLibrary = ref('')
 const inputText = ref('')
 const libraries = ref<UserLibrary[]>([])
 const libraryError = ref('')
 const anonymousLimitDialogVisible = ref(false)
-const libraryExpanded = ref(false)
+const libraryExpanded = ref(true)
 // 联网搜索留给用户选择（会引入外部资料，需用户知情）；HyDE 是知识库级策略，由管理端配置
 const useWebSearch = ref(false)
 const librarySwitchNotice = ref('')
 let libraryNoticeTimer: number | undefined
-const { isLoading: isSending, error: queryError, sources: querySources, submit: submitQuery, reset: resetQuery, restore: restoreQuery } = useUserQuery()
-const queryContextVersion = ref(0)
+const {
+  isLoading: isSending,
+  error: queryError,
+  sources: querySources,
+  submit: submitQuery,
+  reset: resetQuery,
+  restore: restoreQuery,
+} = useUserQuery()
 const sessionError = ref('')
 const currentSessionId = ref<string | null>(null)
 const selectedHistoryItemId = ref<string | null>(null)
@@ -44,65 +65,27 @@ const messages = ref<UserMessage[]>([])
 
 const selectedLibrary = computed(() => libraries.value.find((item) => item.name === activeLibrary.value) || null)
 const activeLibraryName = computed(() => selectedLibrary.value?.name || '未选择知识库')
-const sources = computed<UserSource[]>(() => {
-  const list = querySources.value
-  // 归一到 0~1：rerank 绝对分跨查询不可比，只用“本次查询内相对最高分”做分档基准。
-  // 精排降级(recall)时 score 只是召回序投影，不参与归一也不给百分比。
-  const normOf = (item: (typeof list)[number]): number | null => {
-    if ((item.score_kind ?? 'rerank') !== 'rerank' || item.score === null) return null
-    return Math.max(0, Math.min(1, item.score > 1 ? item.score / 100 : item.score))
-  }
-  const maxNorm = list.reduce((acc, item) => Math.max(acc, normOf(item) ?? 0), 0)
-  return list.map((source, index) => {
-    const isRerank = (source.score_kind ?? 'rerank') === 'rerank'
-    const norm = normOf(source)
-    // 分档只表相对强弱（很相关/较相关/参考），不表答案正确概率；降级态给中性“参考序”。
-    let relevanceLabel: string
-    if (!isRerank) relevanceLabel = '参考序'
-    else if (norm === null || maxNorm <= 0) relevanceLabel = '参考'
-    else {
-      const ratio = norm / maxNorm
-      relevanceLabel = ratio >= 0.9 ? '很相关' : ratio >= 0.6 ? '较相关' : '参考'
-    }
-    const isWebSource = source.source === 'web'
-    return {
-      id: String(source.chunk_id ?? `${isWebSource ? 'web' : 'source'}-${index}`),
-      title: source.document_title || source.section_title || '未命名文档',
-      type: isWebSource
-        ? `联网资料${source.site_name ? ` · ${source.site_name}` : ''}`
-        : source.page_number ? `知识库文档 · 第 ${source.page_number} 页` : '知识库文档',
-      score: norm === null ? '—' : `${Math.round(norm * 100)}%`,
-      relevanceLabel,
-      color: ['#2563eb', '#0f9d78', '#c47f1d'][index % 3],
-      content: source.content,
-      documentId: source.document_id,
-      chunkId: source.chunk_id,
-      chunkIndex: source.chunk_index,
-      pageNumber: source.page_number,
-      sectionTitle: source.section_title,
-      parentTitle: source.parent_title,
-      kind: isWebSource ? 'web' : 'local',
-      url: source.url,
-      siteName: source.site_name,
-    }
-  })
-})
-const chatTitle = computed(() => messages.value.slice().reverse().find((message) => message.role === 'user')?.content || '开始一次新的技术咨询')
-const conversations = computed<UserConversation[]>(() => querySessions.value
-  .slice()
-  .sort((left, right) => right.updated_at - left.updated_at)
-  .map((session) => ({
-    id: session.id,
-    libraryId: session.library_id,
-    title: session.title || '新建技术咨询',
-    time: formatTimestamp(session.updated_at),
-    group: getHistoryGroup(session.updated_at),
-    active: session.id === currentSessionId.value,
-  })))
+const queryContext = useQueryContext(() => selectedLibrary.value?.id)
+const sources = computed<UserSource[]>(() => normalizeSources(querySources.value))
+const conversations = computed<UserConversation[]>(() =>
+  querySessions.value
+    .slice()
+    .sort((left, right) => right.updated_at - left.updated_at)
+    .map((session) => ({
+      id: session.id,
+      libraryId: session.library_id,
+      title: session.title || '新建技术咨询',
+      time: formatTimestamp(session.updated_at),
+      group: getHistoryGroup(session.updated_at),
+      active: session.id === currentSessionId.value,
+    })),
+)
 const queryMessage = computed(() => queryError.value || libraryError.value || sessionError.value)
 const displayName = computed(() => userInfo.value?.display_name || userInfo.value?.username || '访客')
-const roleLabel = computed(() => isLoggedIn.value ? '已登录用户' : '匿名体验用户')
+const roleLabel = computed(() => (isLoggedIn.value ? '已登录用户' : '匿名体验用户'))
 const avatarText = computed(() => displayName.value.trim().slice(0, 1) || '访')
+// 当前会话已是空白（无消息）时不允许再新建；未登录时保持可点（引导去登录）
+const canCreateConversation = computed(() => !isLoggedIn.value || messages.value.length > 0)
 
 function getAnonymousQueryCount() {
   const storedCount = Number.parseInt(window.localStorage.getItem(ANONYMOUS_QUERY_COUNT_KEY) || '0', 10)
@@ -171,10 +154,10 @@ async function loadConversationsForCurrentLibrary() {
     return
   }
 
-  const contextVersion = queryContextVersion.value
+  const context = queryContext.snapshot(libraryId)
   try {
     const sessionRows = (await listQuerySessions(libraryId)).sort((left, right) => right.updated_at - left.updated_at)
-    if (contextVersion !== queryContextVersion.value || selectedLibrary.value?.id !== libraryId || !isLoggedIn.value) return
+    if (!queryContext.isCurrent(context, libraryId) || !isLoggedIn.value) return
 
     querySessions.value = sessionRows
     const session = sessionRows[0]
@@ -186,15 +169,22 @@ async function loadConversationsForCurrentLibrary() {
       return
     }
     const result = await getQuerySessionMessages(session.id)
-    if (contextVersion !== queryContextVersion.value || selectedLibrary.value?.id !== libraryId || !isLoggedIn.value) return
+    if (!queryContext.isCurrent(context, libraryId) || !isLoggedIn.value) return
     currentSessionId.value = result.session_id
     messages.value = result.messages.map(toUserMessage)
     selectedHistoryItemId.value = messages.value.filter((message) => message.role === 'user').at(-1)?.id || null
     const lastUserMessage = [...result.messages].reverse().find((message) => message.role === 'user')
     const lastAssistantMessage = [...result.messages].reverse().find((message) => message.role === 'assistant')
-    restoreQuery({ library_id: result.library_id, session_id: result.session_id, query: lastUserMessage?.content || '', answer: lastAssistantMessage?.content || '', sources: lastAssistantMessage?.sources || [], image_urls: lastAssistantMessage?.image_urls || [] })
+    restoreQuery({
+      library_id: result.library_id,
+      session_id: result.session_id,
+      query: lastUserMessage?.content || '',
+      answer: lastAssistantMessage?.content || '',
+      sources: lastAssistantMessage?.sources || [],
+      image_urls: lastAssistantMessage?.image_urls || [],
+    })
   } catch (error) {
-    if (contextVersion !== queryContextVersion.value) return
+    if (!queryContext.isCurrent(context, libraryId)) return
     sessionError.value = error instanceof Error ? error.message : '历史会话加载失败，请稍后重试'
     currentSessionId.value = null
     querySessions.value = []
@@ -209,17 +199,24 @@ async function restoreConversation(item: UserConversation) {
   }
   const libraryId = selectedLibrary.value?.id
   if (!libraryId) return
-  const contextVersion = queryContextVersion.value
+  const context = queryContext.snapshot(libraryId)
   sessionError.value = ''
   try {
     const result = await getQuerySessionMessages(item.id)
-    if (contextVersion !== queryContextVersion.value || selectedLibrary.value?.id !== libraryId || !isLoggedIn.value) return
+    if (!queryContext.isCurrent(context, libraryId) || !isLoggedIn.value) return
     currentSessionId.value = result.session_id
     messages.value = result.messages.map(toUserMessage)
     selectedHistoryItemId.value = messages.value.filter((message) => message.role === 'user').at(-1)?.id || null
     const lastUserMessage = [...result.messages].reverse().find((message) => message.role === 'user')
     const lastAssistantMessage = [...result.messages].reverse().find((message) => message.role === 'assistant')
-    restoreQuery({ library_id: result.library_id, session_id: result.session_id, query: lastUserMessage?.content || '', answer: lastAssistantMessage?.content || '', sources: lastAssistantMessage?.sources || [], image_urls: lastAssistantMessage?.image_urls || [] })
+    restoreQuery({
+      library_id: result.library_id,
+      session_id: result.session_id,
+      query: lastUserMessage?.content || '',
+      answer: lastAssistantMessage?.content || '',
+      sources: lastAssistantMessage?.sources || [],
+      image_urls: lastAssistantMessage?.image_urls || [],
+    })
     mobileSidebarOpen.value = false
   } catch (error) {
     sessionError.value = error instanceof Error ? error.message : '历史会话加载失败，请稍后重试'
@@ -246,7 +243,7 @@ function toUserLibrary(library: QueryLibrary): UserLibrary {
     id: library.id,
     name: library.name,
     count: library.document_count,
-    color: library.cover_color || '#2563eb',
+    color: library.cover_color || 'var(--primary)',
     status: library.status,
     updatedAt: library.updated_at,
   }
@@ -263,8 +260,11 @@ async function loadLibraries() {
       return
     }
     if (!selectedLibrary.value) {
-      activeLibrary.value = libraries.value[0].name
+      const defaultLibrary = libraries.value.find((library) => library.name === DEFAULT_LIBRARY_NAME)
+      const target = defaultLibrary || libraries.value[0]
+      activeLibrary.value = target.name
       libraryError.value = ''
+      showLibraryNotice(`当前未选择知识库，将展示默认知识库“${target.name}”`)
     }
     invalidateQueryContext()
     await loadConversationsForCurrentLibrary()
@@ -278,6 +278,8 @@ async function createConversation() {
     goToLogin()
     return
   }
+  // 当前会话已经是空白的新建咨询，再点无效；只有当前会话有内容才允许新建
+  if (messages.value.length === 0) return
   const libraryId = selectedLibrary.value?.id
   if (!libraryId) return
   try {
@@ -298,7 +300,7 @@ async function renameConversation(item: UserConversation) {
   if (!title || title === item.title) return
   try {
     const updated = await renameQuerySession(item.id, title)
-    querySessions.value = querySessions.value.map((session) => session.id === updated.id ? updated : session)
+    querySessions.value = querySessions.value.map((session) => (session.id === updated.id ? updated : session))
   } catch (error) {
     sessionError.value = error instanceof Error ? error.message : '会话重命名失败，请稍后重试'
   }
@@ -323,31 +325,59 @@ function selectConversation(item: UserConversation) {
   void restoreConversation(item)
 }
 
+/** 切换侧栏收起/展开（仅桌面端生效），结果持久化以便下次进入保持选择。 */
+function toggleSidebarCollapse() {
+  sidebarCollapsed.value = !sidebarCollapsed.value
+  window.localStorage.setItem(STORAGE_KEY.USER_SIDEBAR_COLLAPSED, String(sidebarCollapsed.value))
+}
+
+/** 批量删除已选会话：逐个调后端删除接口；部分失败时已删的仍同步移出列表，再提示错误。 */
+async function batchDeleteConversations(items: UserConversation[]) {
+  if (items.length === 0) return
+  if (!window.confirm(`确定删除选中的 ${items.length} 个会话吗？删除后不可恢复。`)) return
+  const deletedIds = new Set<string>()
+  try {
+    for (const item of items) {
+      await deleteQuerySession(item.id)
+      deletedIds.add(item.id)
+    }
+  } catch (error) {
+    sessionError.value = error instanceof Error ? error.message : '批量删除会话失败，请稍后重试'
+  }
+  querySessions.value = querySessions.value.filter((session) => !deletedIds.has(session.id))
+  if (currentSessionId.value && deletedIds.has(currentSessionId.value)) {
+    invalidateQueryContext()
+    currentSessionId.value = null
+    selectedHistoryItemId.value = null
+    await loadConversationsForCurrentLibrary()
+  }
+}
+
+/** 在顶部展示一条会自动消失的知识库提示。 */
+function showLibraryNotice(text: string) {
+  librarySwitchNotice.value = text
+  if (libraryNoticeTimer) window.clearTimeout(libraryNoticeTimer)
+  libraryNoticeTimer = window.setTimeout(() => {
+    librarySwitchNotice.value = ''
+  }, 2800)
+}
+
 function selectLibrary(name: string) {
   mobileSidebarOpen.value = false
   if (name === activeLibrary.value) return
   invalidateQueryContext()
   activeLibrary.value = name
   libraryError.value = ''
-  librarySwitchNotice.value = `已切换到“${name}”，正在加载连续聊天记录`
-  if (libraryNoticeTimer) window.clearTimeout(libraryNoticeTimer)
-  libraryNoticeTimer = window.setTimeout(() => { librarySwitchNotice.value = '' }, 2800)
+  showLibraryNotice(`已切换到“${name}”，正在加载连续聊天记录`)
   void loadConversationsForCurrentLibrary()
 }
 
+/** 使当前问答上下文失效：重置流式请求并清空对话与输入。 */
 function invalidateQueryContext() {
-  queryContextVersion.value += 1
+  queryContext.invalidate()
   resetQuery()
   messages.value = []
   inputText.value = ''
-}
-
-function currentQueryContext(libraryId: number) {
-  return `${queryContextVersion.value}:${libraryId}`
-}
-
-function isCurrentQueryContext(context: string, libraryId: number) {
-  return selectedLibrary.value?.id === libraryId && currentQueryContext(libraryId) === context
 }
 
 async function sendMessage() {
@@ -370,36 +400,49 @@ async function sendMessage() {
   inputText.value = ''
   const assistantMessageId = `local-message-${Date.now()}-assistant`
   messages.value.push({ id: assistantMessageId, role: 'assistant', content: '', time: '现在', streaming: true })
-  const context = currentQueryContext(libraryId)
+  const context = queryContext.snapshot(libraryId)
   try {
-    const result = await submitQuery({
-      library_id: libraryId,
-      query: text,
-      session_id: currentSessionId.value || undefined,
-      top_k: 5,
-      use_web_search: useWebSearch.value,
-    }, (delta) => {
-      if (!isCurrentQueryContext(context, libraryId)) return
-      updateAssistantMessage(assistantMessageId, {
-        content: `${messages.value.find((message) => message.id === assistantMessageId)?.content || ''}${delta}`,
-      })
-    })
-    if (!result || !isCurrentQueryContext(context, libraryId)) return
+    const result = await submitQuery(
+      {
+        library_id: libraryId,
+        query: text,
+        session_id: currentSessionId.value || undefined,
+        top_k: 5,
+        use_web_search: useWebSearch.value,
+      },
+      (delta) => {
+        if (!queryContext.isCurrent(context, libraryId)) return
+        updateAssistantMessage(assistantMessageId, {
+          content: `${messages.value.find((message) => message.id === assistantMessageId)?.content || ''}${delta}`,
+        })
+      },
+    )
+    if (!result || !queryContext.isCurrent(context, libraryId)) return
     currentSessionId.value = result.session_id || currentSessionId.value
     updateAssistantMessage(assistantMessageId, { content: result.answer, imageUrls: result.image_urls })
     if (result.session_id) {
+      // 首条消息发送成功后自动重命名会话（取用户消息前 10 字）
+      const currentSession = querySessions.value.find((s) => s.id === result.session_id)
+      if (currentSession && (!currentSession.title || currentSession.title === '新建技术咨询')) {
+        const autoTitle = text.length > 10 ? text.slice(0, 10) + '...' : text
+        try {
+          await renameQuerySession(result.session_id, autoTitle)
+        } catch {}
+      }
       try {
-        querySessions.value = (await listQuerySessions(libraryId)).sort((left, right) => right.updated_at - left.updated_at)
+        querySessions.value = (await listQuerySessions(libraryId)).sort(
+          (left, right) => right.updated_at - left.updated_at,
+        )
       } catch {}
     }
   } catch (error) {
-    if (!isCurrentQueryContext(context, libraryId)) return
+    if (!queryContext.isCurrent(context, libraryId)) return
     inputText.value = text
     updateAssistantMessage(assistantMessageId, {
       content: error instanceof Error ? error.message : '查询失败，请稍后重试',
     })
   } finally {
-    if (!isCurrentQueryContext(context, libraryId)) return
+    if (!queryContext.isCurrent(context, libraryId)) return
     updateAssistantMessage(assistantMessageId, { streaming: false })
   }
 }
@@ -410,8 +453,13 @@ function updateAssistantMessage(messageId: string, updates: Partial<UserMessage>
   messages.value[messageIndex] = { ...messages.value[messageIndex], ...updates }
 }
 
-function toggleTheme() { darkMode.value = !darkMode.value }
-function useSuggestion(text: string) { inputText.value = text }
+function toggleTheme() {
+  darkMode.value = !darkMode.value
+  window.localStorage.setItem(STORAGE_KEY.USER_DARK_MODE, String(darkMode.value))
+}
+function useSuggestion(text: string) {
+  inputText.value = text
+}
 
 watch(isLoggedIn, (loggedIn, previouslyLoggedIn) => {
   if (loggedIn === previouslyLoggedIn) return
@@ -431,14 +479,86 @@ onMounted(loadLibraries)
 
 <template>
   <UserLayout :dark-mode="darkMode">
-    <UserSidebar :mobile-open="mobileSidebarOpen" :libraries="libraries" :active-library="activeLibrary" :conversations="conversations" :search-query="searchQuery" :library-expanded="libraryExpanded" :display-name="displayName" :role-label="roleLabel" :avatar-text="avatarText" @create-conversation="createConversation" @select-library="selectLibrary" @select-conversation="selectConversation" @rename-conversation="renameConversation" @delete-conversation="deleteConversation" @update:search-query="searchQuery = $event" @close-mobile="mobileSidebarOpen = false" @toggle-library="libraryExpanded = !libraryExpanded" />
+    <UserSidebar
+      :mobile-open="mobileSidebarOpen"
+      :collapsed="sidebarCollapsed"
+      :libraries="libraries"
+      :active-library="activeLibrary"
+      :conversations="conversations"
+      :search-query="searchQuery"
+      :library-expanded="libraryExpanded"
+      :display-name="displayName"
+      :role-label="roleLabel"
+      :avatar-text="avatarText"
+      :create-disabled="!canCreateConversation"
+      @create-conversation="createConversation"
+      @select-library="selectLibrary"
+      @select-conversation="selectConversation"
+      @rename-conversation="renameConversation"
+      @delete-conversation="deleteConversation"
+      @batch-delete-conversations="batchDeleteConversations"
+      @update:search-query="searchQuery = $event"
+      @close-mobile="mobileSidebarOpen = false"
+      @toggle-collapse="toggleSidebarCollapse"
+      @toggle-library="libraryExpanded = !libraryExpanded"
+    />
     <div v-if="mobileSidebarOpen" class="mobile-backdrop" @click="mobileSidebarOpen = false"></div>
-    <main class="workspace"><div v-if="librarySwitchNotice" class="library-switch-toast" role="status">{{ librarySwitchNotice }}</div><UserTopbar :dark-mode="darkMode" :active-library="activeLibraryName" :live-data="libraries.length > 0" :logged-in="isLoggedIn" :display-name="displayName" :role-label="roleLabel" :avatar-text="avatarText" @open-menu="mobileSidebarOpen = true" @toggle-theme="toggleTheme" @login="goToLogin" @logout="logout" /><div class="content-grid"><UserChatPanel :messages="messages" :input-text="inputText" :is-sending="isSending" :source-panel-open="sourcePanelOpen" :title="chatTitle" :source-count="sources.length" :use-web-search="useWebSearch" @toggle-sources="sourcePanelOpen = !sourcePanelOpen" @update:input-text="inputText = $event" @update:use-web-search="useWebSearch = $event" @send="sendMessage" @suggestion="useSuggestion" /><UserSourcePanel :open="sourcePanelOpen" :active-library="activeLibraryName" :sources="sources" :document-count="selectedLibrary?.count || 0" :updated-at="selectedLibrary?.updatedAt || null" @close="sourcePanelOpen = false" /></div><p v-if="queryMessage" class="user-query-error">{{ queryMessage }}</p></main>
-    <t-dialog v-model:visible="anonymousLimitDialogVisible" header="登录后继续咨询" confirm-btn="去登录" cancel-btn="暂不登录" @confirm="confirmLoginAfterLimit">
+    <main class="workspace">
+      <div v-if="librarySwitchNotice" class="library-switch-toast" role="status">{{ librarySwitchNotice }}</div>
+      <UserTopbar
+        :dark-mode="darkMode"
+        :active-library="activeLibraryName"
+        :live-data="libraries.length > 0"
+        :logged-in="isLoggedIn"
+        :display-name="displayName"
+        :role-label="roleLabel"
+        :avatar-text="avatarText"
+        @open-menu="mobileSidebarOpen = true"
+        @toggle-theme="toggleTheme"
+        @login="goToLogin"
+        @logout="logout"
+      />
+      <div class="content-grid" :class="{ 'has-sources': sourcePanelOpen }">
+        <UserChatPanel
+          :messages="messages"
+          :input-text="inputText"
+          :is-sending="isSending"
+          :source-count="sources.length"
+          :use-web-search="useWebSearch"
+          @toggle-sources="sourcePanelOpen = !sourcePanelOpen"
+          @update:input-text="inputText = $event"
+          @update:use-web-search="useWebSearch = $event"
+          @send="sendMessage"
+          @suggestion="useSuggestion"
+        /><UserSourcePanel :open="sourcePanelOpen" :sources="sources" @close="sourcePanelOpen = false" />
+      </div>
+      <p v-if="queryMessage" class="user-query-error">{{ queryMessage }}</p>
+    </main>
+    <t-dialog
+      v-model:visible="anonymousLimitDialogVisible"
+      header="登录后继续咨询"
+      confirm-btn="去登录"
+      cancel-btn="暂不登录"
+      @confirm="confirmLoginAfterLimit"
+    >
       <p>匿名体验已使用 3 条消息。登录后可继续使用知识库问答功能。</p>
     </t-dialog>
   </UserLayout>
 </template>
 <style scoped>
-.library-switch-toast { position: absolute; top: 12px; left: 50%; z-index: 30; transform: translateX(-50%); padding: 8px 14px; border: 1px solid #bfdbfe; border-radius: 6px; background: #eff6ff; color: #1d4ed8; box-shadow: 0 8px 20px rgb(37 99 235 / 12%); font-size: 12px; }
+.library-switch-toast {
+  /* 相对整个页面顶部居中，而非只在右侧工作区（topbar）内居中 */
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 30;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  border: 1px solid var(--primary-border);
+  border-radius: 6px;
+  background: var(--primary-weak);
+  color: var(--primary-deep);
+  box-shadow: var(--shadow-glow);
+  font-size: 12px;
+}
 </style>

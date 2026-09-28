@@ -20,9 +20,7 @@ const uploading = ref(false)
 const fileInput = ref<HTMLInputElement>()
 const uploadError = ref('')
 
-const selectedFileNames = computed(() =>
-  files.value.map((file) => file.name),
-)
+const selectedFileNames = computed(() => files.value.map((file) => file.name))
 
 /** 展示待上传文件名，避免原生文件控件被清空后显示错误的选择状态。 */
 const selectedFileSummary = computed(() => {
@@ -48,9 +46,7 @@ function selectFiles(event: Event) {
   const input = event.target as HTMLInputElement
   const selectedFiles = Array.from(input.files || [])
   const supportedFiles = selectedFiles.filter(isSupportedFile)
-  const invalidFiles = selectedFiles
-    .filter((file) => !isSupportedFile(file))
-    .map((file) => file.name)
+  const invalidFiles = selectedFiles.filter((file) => !isSupportedFile(file)).map((file) => file.name)
   const existingKeys = new Set(files.value.map(fileKey))
   const uniqueFiles = supportedFiles.filter((file) => {
     const key = fileKey(file)
@@ -60,9 +56,7 @@ function selectFiles(event: Event) {
   })
   files.value = [...files.value, ...uniqueFiles]
   input.value = ''
-  uploadError.value = invalidFiles.length
-    ? `不支持的文件格式：${invalidFiles.join('、')}，仅支持 PDF 和 MD`
-    : ''
+  uploadError.value = invalidFiles.length ? `不支持的文件格式：${invalidFiles.join('、')}，仅支持 PDF 和 MD` : ''
 }
 
 /** 识别同一批次中重复选择的本地文件。内容重复但文件名不同的情况由后端校验。 */
@@ -142,48 +136,22 @@ watch(
     @confirm="upload"
   >
     <div class="dialog-fields">
-      <p
-        class="upload-form-hint"
-        :class="{ 'upload-form-hint--error': isUploadHintError }"
-      >
+      <p class="upload-form-hint" :class="{ 'upload-form-hint--error': isUploadHintError }">
         {{ uploadFormHint }}
       </p>
-      <t-select
-        v-model="libraryId"
-        :options="libraryOptions"
-        placeholder="选择知识库"
-      />
-      <input
-        ref="fileInput"
-        class="upload-file-input"
-        type="file"
-        accept=".pdf,.md"
-        multiple
-        @change="selectFiles"
-      />
+      <t-select v-model="libraryId" :options="libraryOptions" placeholder="选择知识库" />
+      <input ref="fileInput" class="upload-file-input" type="file" accept=".pdf,.md" multiple @change="selectFiles" />
       <p class="upload-supported-hint">当前仅支持 PDF 和 MD 类型文件。</p>
       <div class="upload-selector-row">
-        <t-button variant="outline" :disabled="uploading" @click="openFileSelector">
-          选择文件
-        </t-button>
+        <t-button variant="outline" :disabled="uploading" @click="openFileSelector"> 选择文件 </t-button>
         <span class="upload-selection-summary" :title="selectedFileSummary">
           {{ selectedFileSummary }}
         </span>
       </div>
       <div v-if="selectedFileNames.length" class="upload-file-list">
-        <div
-          v-for="(name, index) in selectedFileNames"
-          :key="`${name}-${index}`"
-          class="upload-file-item"
-        >
+        <div v-for="(name, index) in selectedFileNames" :key="`${name}-${index}`" class="upload-file-item">
           <span :title="name">{{ name }}</span>
-          <t-button
-            variant="text"
-            theme="danger"
-            size="small"
-            :disabled="uploading"
-            @click="removeFile(index)"
-          >
+          <t-button variant="text" theme="danger" size="small" :disabled="uploading" @click="removeFile(index)">
             移除
           </t-button>
         </div>
@@ -193,13 +161,63 @@ watch(
 </template>
 
 <style scoped>
-.upload-file-list { display: grid; max-height: 180px; gap: 6px; overflow-y: auto; }
-.upload-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
-.upload-selector-row { display: flex; min-width: 0; align-items: center; gap: 10px; }
-.upload-selection-summary { min-width: 0; overflow: hidden; color: #6b7280; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.upload-form-hint { margin: 0; color: #2563eb; font-size: 12px; line-height: 1.5; }
-.upload-form-hint--error { color: #dc2626; }
-.upload-file-item { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border: 1px solid #e5e7eb; border-radius: 4px; background: #f8fafc; }
-.upload-file-item span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upload-supported-hint { margin: -2px 0 4px; color: #64748b; font-size: 11px; }
+.upload-file-list {
+  display: grid;
+  max-height: 180px;
+  gap: 6px;
+  overflow-y: auto;
+}
+.upload-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.upload-selector-row {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+.upload-selection-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-form-hint {
+  margin: 0;
+  color: var(--primary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.upload-form-hint--error {
+  color: var(--danger);
+}
+.upload-file-item {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface-alt);
+}
+.upload-file-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-supported-hint {
+  margin: -2px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
 </style>

@@ -1,9 +1,7 @@
 """
 Markdown 图片处理节点。
-
-@FilePath: processor/import_processor/nodes/node_md_img.py
-@Date: 2026-09-07
-@Description: 提取 Markdown 图片、生成图片摘要、上传 MinIO，并替换为可访问的图片引用。
+processor/import_processor/nodes/node_md_img.py
+提取 Markdown 图片、生成图片摘要、上传 MinIO，并替换为可访问的图片引用。
 """
 import base64
 import json

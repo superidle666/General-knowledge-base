@@ -6,11 +6,14 @@
  * @BusinessRule: 管理权限勾选时同步子权限；系统管理员角色不可在页面内修改或删除。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { AddIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Permission, type Role } from '../../../api/mysql'
 import { PAGINATION } from '../../../constants'
+import { useRequest } from '../../../composables'
 import { isSystemAdminRole } from '../shared/formatters'
+import { ROLE_STATUS_META, getLifecycleStatusMeta, type StatusMeta } from '../shared/statusMeta'
+import { useAdminCountsStore } from '../../../store/modules/adminCounts'
 
 type RoleForm = {
   code: string
@@ -25,16 +28,11 @@ type PermissionGroup = {
   children: Permission[]
 }
 
-const emit = defineEmits<{
-  (event: 'update-counts', counts: { roles: number; permissions: number }): void
-}>()
+const countsStore = useAdminCountsStore()
 
-const roles = ref<Role[]>([])
 const permissions = ref<Permission[]>([])
-const loading = ref(false)
 const showDeleted = ref(false)
 const deletingRoleId = ref<number>()
-const errorMessage = ref('')
 const createError = ref('')
 const editError = ref('')
 const creatingRole = ref(false)
@@ -56,6 +54,27 @@ const columns = [
   { colKey: 'op', title: '操作', width: 220, align: 'center' },
 ]
 
+/** 加载角色与权限数据：角色按系统管理员优先排序，并同步侧栏统计。 */
+const rolesRequest = useRequest(
+  async () => {
+    const [roleData, permissionData] = await Promise.all([
+      mysqlApi.listRoles(showDeleted.value ? 'include_deleted=true' : ''),
+      mysqlApi.listPermissions(),
+    ])
+    const sortedRoles = roleData.sort(
+      (left, right) => Number(isSystemAdminRole(right.code)) - Number(isSystemAdminRole(left.code)),
+    )
+    permissions.value = permissionData
+    countsStore.updateCounts({ roles: sortedRoles.length, permissions: permissionData.length })
+    return sortedRoles
+  },
+  { immediate: true },
+)
+const roles = computed(() => rolesRequest.data.value ?? [])
+const loading = rolesRequest.loading
+const mutationError = ref('')
+const errorMessage = computed(() => mutationError.value || rolesRequest.error.value?.message || '')
+
 const permissionGroups = computed<PermissionGroup[]>(() =>
   permissions.value
     .filter((permission) => permission.parent_id === null)
@@ -75,6 +94,12 @@ const tablePagination = computed(() => ({
 function handlePageChange(pageInfo: { current: number; pageSize: number }) {
   tablePage.value = pageInfo.current
   tablePageSize.value = pageInfo.pageSize
+}
+
+// 注意：此处不能写成内联多语句表达式（@change="a; b"），Prettier 会拆行导致模板编译失败
+function handleShowDeletedChange() {
+  tablePage.value = 1
+  loadRoles()
 }
 
 function createNewRole(): RoleForm {
@@ -104,14 +129,9 @@ function validateEditRole() {
   return editRole.value.name.trim() ? '' : '请输入角色名称。'
 }
 
-function getStatusTheme(row: Role) {
-  if (row.deleted_at) return 'danger'
-  return row.status === 'active' ? 'success' : 'default'
-}
-
-function statusLabel(row: Role) {
-  if (row.deleted_at) return '已删除'
-  return row.status === 'active' ? '已启用' : '已停用'
+/** 角色行状态元数据；软删除行优先显示已删除。 */
+function roleStatusMeta(row: Role): StatusMeta {
+  return getLifecycleStatusMeta(ROLE_STATUS_META, row.status, row.deleted_at)
 }
 
 function parentChecked(form: { permission_codes: string[] }, group: PermissionGroup) {
@@ -119,8 +139,9 @@ function parentChecked(form: { permission_codes: string[] }, group: PermissionGr
 }
 
 function parentIndeterminate(form: { permission_codes: string[] }, group: PermissionGroup) {
-  const selected = [group.parent, ...group.children]
-    .filter((permission) => form.permission_codes.includes(permission.code)).length
+  const selected = [group.parent, ...group.children].filter((permission) =>
+    form.permission_codes.includes(permission.code),
+  ).length
   return selected > 0 && selected < group.children.length + 1
 }
 
@@ -137,7 +158,12 @@ function toggleParent(form: { permission_codes: string[] }, group: PermissionGro
   form.permission_codes = [...selected]
 }
 
-function toggleChild(form: { permission_codes: string[] }, group: PermissionGroup, child: Permission, checked: unknown) {
+function toggleChild(
+  form: { permission_codes: string[] },
+  group: PermissionGroup,
+  child: Permission,
+  checked: unknown,
+) {
   const selected = new Set(form.permission_codes)
   if (checked === true) selected.add(child.code)
   else selected.delete(child.code)
@@ -156,7 +182,7 @@ async function toggleRoleStatus(row: Role) {
     await mysqlApi.updateRole(row.id, { status: row.status === 'active' ? 'disabled' : 'active' })
     await loadRoles()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '角色状态更新失败'
+    mutationError.value = error instanceof Error ? error.message : '角色状态更新失败'
   } finally {
     savingRole.value = false
   }
@@ -170,7 +196,7 @@ async function deleteRole(row: Role) {
     await mysqlApi.deleteRole(row.id)
     await loadRoles()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '角色删除失败'
+    mutationError.value = error instanceof Error ? error.message : '角色删除失败'
   } finally {
     deletingRoleId.value = undefined
   }
@@ -183,27 +209,19 @@ async function restoreRole(row: Role) {
     await mysqlApi.restoreRole(row.id)
     await loadRoles()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '角色恢复失败'
+    mutationError.value = error instanceof Error ? error.message : '角色恢复失败'
   } finally {
     deletingRoleId.value = undefined
   }
 }
 
+/** 重新加载角色与权限；加载错误由 errorMessage 统一展示。 */
 async function loadRoles() {
-  loading.value = true
-  errorMessage.value = ''
+  mutationError.value = ''
   try {
-    const [roleData, permissionData] = await Promise.all([
-      mysqlApi.listRoles(showDeleted.value ? 'include_deleted=true' : ''),
-      mysqlApi.listPermissions(),
-    ])
-    roles.value = roleData.sort((left, right) => Number(isSystemAdminRole(right.code)) - Number(isSystemAdminRole(left.code)))
-    permissions.value = permissionData
-    emit('update-counts', { roles: roles.value.length, permissions: permissions.value.length })
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '角色数据加载失败'
-  } finally {
-    loading.value = false
+    await rolesRequest.execute()
+  } catch {
+    // 加载错误通过 rolesRequest.error 在模板中展示
   }
 }
 
@@ -259,10 +277,6 @@ async function saveRole() {
     savingRole.value = false
   }
 }
-
-onMounted(() => {
-  void loadRoles()
-})
 </script>
 
 <template>
@@ -282,7 +296,7 @@ onMounted(() => {
     </div>
 
     <div class="table-filter-row">
-      <t-checkbox v-model="showDeleted" @change="tablePage = 1; loadRoles()">显示已删除</t-checkbox>
+      <t-checkbox v-model="showDeleted" @change="handleShowDeletedChange">显示已删除</t-checkbox>
     </div>
 
     <div v-if="errorMessage" class="admin-error">
@@ -292,7 +306,13 @@ onMounted(() => {
     <div v-if="loading" class="admin-loading">正在加载角色数据...</div>
 
     <div class="panel table-panel">
-      <t-table :data="roles" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
+      <t-table
+        :data="roles"
+        :columns="columns"
+        row-key="id"
+        :pagination="tablePagination"
+        @page-change="handlePageChange"
+      >
         <template #name="{ row }">
           <div class="role-name">
             <div class="role-symbol">{{ row.name.slice(0, 1) }}</div>
@@ -303,8 +323,8 @@ onMounted(() => {
           <t-tag theme="primary" variant="light">{{ row.permissions.length }} 项权限</t-tag>
         </template>
         <template #status="{ row }">
-          <t-tag :theme="getStatusTheme(row)" variant="light">
-            {{ statusLabel(row) }}
+          <t-tag :theme="roleStatusMeta(row).theme" variant="light">
+            {{ roleStatusMeta(row).label }}
           </t-tag>
         </template>
         <template #op="{ row }">
@@ -326,7 +346,8 @@ onMounted(() => {
               size="small"
               :loading="deletingRoleId === row.id"
               @click="deleteRole(row)"
-            >删除</t-button>
+              >删除</t-button
+            >
             <t-button
               v-else
               variant="text"
@@ -334,12 +355,15 @@ onMounted(() => {
               size="small"
               :loading="deletingRoleId === row.id"
               @click="restoreRole(row)"
-            >恢复</t-button>
+              >恢复</t-button
+            >
           </div>
           <span v-else class="protected-label">系统内置</span>
         </template>
-              <template #totalContent><span class="table-pagination-total">共 {{ roles.length }} 条数据</span></template>
-</t-table>
+        <template #totalContent
+          ><span class="table-pagination-total">共 {{ roles.length }} 条数据</span></template
+        >
+      </t-table>
     </div>
 
     <t-dialog
@@ -360,14 +384,16 @@ onMounted(() => {
               :checked="parentChecked(newRole, group)"
               :indeterminate="parentIndeterminate(newRole, group)"
               @change="toggleParent(newRole, group, $event)"
-            >{{ group.parent.name }}</t-checkbox>
+              >{{ group.parent.name }}</t-checkbox
+            >
             <div class="permission-group__children">
               <t-checkbox
                 v-for="child in group.children"
                 :key="child.id"
                 :checked="childChecked(newRole, child)"
                 @change="toggleChild(newRole, group, child, $event)"
-              >{{ child.name }}</t-checkbox>
+                >{{ child.name }}</t-checkbox
+              >
             </div>
           </div>
         </div>
@@ -386,7 +412,10 @@ onMounted(() => {
         <t-input v-model="editRole.description" label="角色描述" />
         <t-select
           v-model="editRole.status"
-          :options="[{ label: '已启用', value: 'active' }, { label: '已停用', value: 'disabled' }]"
+          :options="[
+            { label: '已启用', value: 'active' },
+            { label: '已停用', value: 'disabled' },
+          ]"
           label="状态"
         />
         <div class="permission-picker">
@@ -396,14 +425,16 @@ onMounted(() => {
               :checked="parentChecked(editRole, group)"
               :indeterminate="parentIndeterminate(editRole, group)"
               @change="toggleParent(editRole, group, $event)"
-            >{{ group.parent.name }}</t-checkbox>
+              >{{ group.parent.name }}</t-checkbox
+            >
             <div class="permission-group__children">
               <t-checkbox
                 v-for="child in group.children"
                 :key="child.id"
                 :checked="childChecked(editRole, child)"
                 @change="toggleChild(editRole, group, child, $event)"
-              >{{ child.name }}</t-checkbox>
+                >{{ child.name }}</t-checkbox
+              >
             </div>
           </div>
         </div>
@@ -454,10 +485,19 @@ onMounted(() => {
   display: grid;
   place-items: center;
   border-radius: 5px;
-  color: #2563eb;
-  background: #eff6ff;
+  color: var(--primary);
+  background: var(--primary-weak);
   font-size: 11px;
   font-weight: 600;
 }
-.protected-label { display: inline-flex; align-items: center; min-height: 28px; color: #9ca3af; font-size: 11px; font-weight: 400; line-height: 1.4; white-space: nowrap; }
+.protected-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: var(--weak);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+}
 </style>

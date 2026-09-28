@@ -1,9 +1,7 @@
 """
 问答任务状态工具。
-
-@FilePath: utils/task_utils.py
-@Date: 2026-09-07
-@Description: 在单进程内追踪工作流节点进度、任务状态和结果，并同步 SSE 事件。
+utils/task_utils.py
+在单进程内追踪工作流节点进度、任务状态和结果，并同步 SSE 事件。
 """
 
 from typing import Dict, List

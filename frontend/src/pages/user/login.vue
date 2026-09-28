@@ -18,9 +18,11 @@ const rememberLogin = ref(true)
 const loginError = ref('')
 const loginLoading = ref(false)
 
-const subtitle = computed(() => route.query.reason === 'anonymous-limit'
-  ? '匿名体验已达到 3 条消息，请登录后继续咨询。'
-  : '登录后即可继续使用工智库进行技术咨询。')
+const subtitle = computed(() =>
+  route.query.reason === 'anonymous-limit'
+    ? '匿名体验已达到 3 条消息，请登录后继续咨询。'
+    : '登录后即可继续使用工智库进行技术咨询。',
+)
 
 function getRedirectPath() {
   const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
@@ -66,7 +68,15 @@ async function login() {
         <t-input v-model="username" name="user-login-account" autocomplete="off" placeholder="账号" clearable autofocus>
           <template #prefix-icon><UserIcon /></template>
         </t-input>
-        <t-input v-model="password" name="user-login-password" type="password" autocomplete="new-password" placeholder="登录密码" clearable @enter="login">
+        <t-input
+          v-model="password"
+          name="user-login-password"
+          type="password"
+          autocomplete="new-password"
+          placeholder="登录密码"
+          clearable
+          @enter="login"
+        >
           <template #prefix-icon><LockOnIcon /></template>
         </t-input>
         <t-checkbox v-model="rememberLogin">保持登录状态</t-checkbox>
@@ -81,9 +91,88 @@ async function login() {
 </template>
 
 <style scoped>
-.user-login-page { min-height: 100vh; display: grid; place-items: center; align-content: center; gap: 18px; padding: 24px; background: #f7f8fa; color: #1f2937; }
-.user-login-card { box-sizing: border-box; width: min(100%, 420px); background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 32px; box-shadow: 0 12px 35px rgb(15 23 42 / 7%); }
-.user-login-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }.user-login-brand > div:last-child { display: grid; gap: 2px; }.user-login-brand strong { font-size: 17px; }.user-login-brand span { color: #6b7280; font-size: 11px; }.user-login-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 8px; color: #fff; font-weight: 700; background: #2563eb; }
-.user-login-eyebrow { color: #6b7280; font-size: 11px; letter-spacing: .04em; }.user-login-card h1 { font-size: 24px; margin: 8px 0 6px; }.user-login-subtitle { color: #6b7280; font-size: 13px; line-height: 21px; margin: 0 0 26px; }.user-login-form { display: grid; gap: 16px; }.user-login-error { box-sizing: border-box; color: #b91c1c; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; padding: 8px 10px; font-size: 12px; line-height: 18px; }.user-login-footer { color: #9ca3af; font-size: 11px; }
-@media (max-width: 480px) { .user-login-card { padding: 24px 20px; } }
+.user-login-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 18px;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+}
+.user-login-card {
+  box-sizing: border-box;
+  width: min(100%, 420px);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 32px;
+  box-shadow: var(--shadow-card);
+}
+.user-login-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+.user-login-brand > div:last-child {
+  display: grid;
+  gap: 2px;
+}
+.user-login-brand strong {
+  font-size: 17px;
+}
+.user-login-brand span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.user-login-mark {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--on-primary);
+  font-weight: 700;
+  background: var(--primary);
+}
+.user-login-eyebrow {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.user-login-card h1 {
+  font-size: 24px;
+  margin: 8px 0 6px;
+}
+.user-login-subtitle {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 21px;
+  margin: 0 0 26px;
+}
+.user-login-form {
+  display: grid;
+  gap: 16px;
+}
+.user-login-error {
+  box-sizing: border-box;
+  color: var(--danger-deep);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 18px;
+}
+.user-login-footer {
+  color: var(--weak);
+  font-size: 11px;
+}
+@media (max-width: 480px) {
+  .user-login-card {
+    padding: 24px 20px;
+  }
+}
 </style>

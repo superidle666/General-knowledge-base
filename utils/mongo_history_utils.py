@@ -1,10 +1,7 @@
 """
 MongoDB 会话历史工具。
-
-@FilePath: utils/mongo_history_utils.py
-@Date: 2026-09-07
-@Description: 管理用户会话、问答消息、来源和回答图片的持久化及历史查询。
-@BusinessRule: 会话和消息查询必须限制在当前用户范围内。
+utils/mongo_history_utils.py
+管理用户会话、问答消息、来源和回答图片的持久化及历史查询。会话和消息查询必须限制在当前用户范围内。
 """
 
 # 导入系统模块：用于读取环境变量

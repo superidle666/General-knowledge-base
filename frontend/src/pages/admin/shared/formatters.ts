@@ -3,6 +3,7 @@
 import type { Document, Library, User } from '../../../api/mysql'
 import { formatDate } from '../../../utils/date'
 import { formatFileSize } from '../../../utils/format'
+import { DOCUMENT_STATUS_META, USER_STATUS_META, getStatusMeta, type TagTheme } from './statusMeta'
 
 // 管理端列表展示模型：将后端字段转换为表格可读文本。
 
@@ -14,6 +15,7 @@ export type DocumentRow = Document & {
   size: string
   updated: string
   statusLabel: string
+  statusTheme: TagTheme
 }
 
 /** 用户列表的派生行模型，补充首个角色和本地化状态文本。 */
@@ -22,30 +24,12 @@ export type UserRow = User & {
   role: string
   last: string
   statusLabel: string
-}
-
-/** 文档状态到中文标签的映射。 */
-export const documentStatusLabels: Record<string, string> = {
-  ready: '可检索',
-  processing: '处理中',
-  needs_review: '待确认实体',
-  failed: '失败',
-  deleted: '已删除',
-  uploaded: '待处理',
-  published: '可检索',
-  archived: '已删除',
+  statusTheme: TagTheme
 }
 
 /** 将文档生命周期状态转换为管理端中文显示文本。 */
 export function formatDocumentStatus(status: string) {
-  return documentStatusLabels[status] || status
-}
-
-/** 用户状态到中文标签的映射。 */
-const userStatusLabels: Record<string, string> = {
-  active: '正常',
-  disabled: '已停用',
-  locked: '已锁定',
+  return getStatusMeta(DOCUMENT_STATUS_META, status).label
 }
 
 /** 将 ISO 时间转换为管理端日期时间文本；空值显示占位符。 */
@@ -68,6 +52,7 @@ export function formatSizeInMb(value: number | null) {
 export function mapDocument(document: Document, libraries: Library[]): DocumentRow {
   const library = libraries.find((item) => item.id === document.library_id)
   const extension = document.original_filename.split('.').pop() || 'FILE'
+  const statusMeta = getStatusMeta(DOCUMENT_STATUS_META, document.status)
 
   return {
     ...document,
@@ -77,18 +62,21 @@ export function mapDocument(document: Document, libraries: Library[]): DocumentR
     type: extension.toUpperCase(),
     size: formatSizeInMb(document.file_size),
     updated: formatTime(document.updated_at, true),
-    statusLabel: documentStatusLabels[document.status] || document.status,
+    statusLabel: statusMeta.label,
+    statusTheme: statusMeta.theme,
   }
 }
 
 /** 将用户接口数据映射为管理端用户表格行。 */
 export function mapUser(user: User): UserRow {
+  const statusMeta = getStatusMeta(USER_STATUS_META, user.status)
   return {
     ...user,
     name: user.display_name,
     role: user.roles[0] || 'user',
     last: formatTime(user.last_login_at, true),
-    statusLabel: userStatusLabels[user.status] || user.status,
+    statusLabel: statusMeta.label,
+    statusTheme: statusMeta.theme,
   }
 }
 

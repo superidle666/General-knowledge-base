@@ -1,32 +1,23 @@
-/** HTTP 请求封装，统一处理 API 地址、认证令牌和错误信息。 */
+/**
+ * JSON REST 请求封装（与 api/auth.authenticatedFetch 的分层边界见其文件头注释）。
+ *
+ * 职责边界：本层只做 JSON 接口三件事——默认 Content-Type、发起 authenticatedFetch、
+ * 把非 2xx 响应体反序列化为 Error 抛出；凭据注入、401 刷新与过期广播全部由
+ * authenticatedFetch 负责，令牌唯一权威在 store/modules/user.ts。
+ * SSE 流式（api/query.ts）与二进制上传（api/mysql.ts）需要原始 Response，
+ * 不经本层，请直接使用 authenticatedFetch。
+ */
 
-import { useUserStore } from '../../store/modules/user'
-import { authenticatedFetch, getAccessToken } from '../../api/auth'
-
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
-
-function getErrorMessage(body: unknown, fallback: string) {
-  if (!body || typeof body !== 'object' || !('detail' in body)) return fallback
-  const detail = body.detail
-  if (typeof detail === 'string') return detail
-  if (!Array.isArray(detail)) return fallback
-  const messages = detail
-    .map((item) => item && typeof item === 'object' && 'msg' in item && typeof item.msg === 'string' ? item.msg : '')
-    .filter(Boolean)
-  return messages.join('；') || fallback
-}
+import { authenticatedFetch } from '../../api/auth'
+import { getErrorMessage } from '../error'
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const userStore = useUserStore()
   const headers = new Headers(options.headers)
   if (!(options.body instanceof FormData)) headers.set('Content-Type', 'application/json')
-  if (userStore.token) headers.set('Authorization', 'Bearer ' + userStore.token)
 
   let response: Response
   try {
     response = await authenticatedFetch(path, { ...options, headers })
-    const refreshedToken = getAccessToken()
-    if (refreshedToken && refreshedToken !== userStore.token) userStore.setToken(refreshedToken)
   } catch {
     throw new Error('无法连接后端服务，请确认 FastAPI 服务已启动')
   }
@@ -36,5 +27,4 @@ export async function request<T>(path: string, options: RequestInit = {}): Promi
   return body as T
 }
 
-export { API_BASE }
 export default request

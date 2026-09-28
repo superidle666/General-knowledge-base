@@ -21,13 +21,16 @@ type LogParams = {
 
 const resourceType = ref('')
 const operation = ref('')
-const pagination = usePagination<OperationLog, LogParams>(async ({ page, pageSize, resourceType: selectedResource, operation: selectedOperation }) => {
-  const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
-  if (selectedResource) query.set('resource_type', selectedResource)
-  if (selectedOperation) query.set('operation', selectedOperation)
-  const result = await mysqlApi.listLogs(query.toString())
-  return { data: result.items, total: result.total }
-}, { initialPageSize: PAGINATION.PAGE_SIZE, immediate: true })
+const pagination = usePagination<OperationLog, LogParams>(
+  async ({ page, pageSize, resourceType: selectedResource, operation: selectedOperation }) => {
+    const query = new URLSearchParams({ page: String(page), page_size: String(pageSize) })
+    if (selectedResource) query.set('resource_type', selectedResource)
+    if (selectedOperation) query.set('operation', selectedOperation)
+    const result = await mysqlApi.listLogs(query.toString())
+    return { data: result.items, total: result.total }
+  },
+  { initialPageSize: PAGINATION.PAGE_SIZE, immediate: true },
+)
 const logs = pagination.data
 const total = pagination.total
 const page = pagination.currentPage
@@ -72,11 +75,48 @@ const columns = [
 ]
 
 function operationLabel(value: string) {
-  return ({ login: '登录', logout: '退出登录', create: '创建', update: '更新', delete: '删除', restore: '恢复', enable: '启用', disable: '停用', upload: '上传', queue: '入队', retry: '重试', cancel: '取消', update_tags: '更新标签', add_member: '添加成员', remove_member: '移除成员' } as Record<string, string>)[value] || value
+  return (
+    (
+      {
+        login: '登录',
+        logout: '退出登录',
+        create: '创建',
+        update: '更新',
+        delete: '删除',
+        restore: '恢复',
+        enable: '启用',
+        disable: '停用',
+        upload: '上传',
+        queue: '入队',
+        retry: '重试',
+        cancel: '取消',
+        update_tags: '更新标签',
+        add_member: '添加成员',
+        remove_member: '移除成员',
+      } as Record<string, string>
+    )[value] || value
+  )
 }
 
 function resourceLabel(value: string | null) {
-  return ({ auth_session: '认证会话', user: '用户', role: '角色', permission: '权限', library: '知识库', document: '文档', tag: '标签', import_task: '导入任务', library_member: '知识库成员', system_setting: '系统设置' } as Record<string, string>)[value || ''] || value || '-'
+  return (
+    (
+      {
+        auth_session: '认证会话',
+        user: '用户',
+        role: '角色',
+        permission: '权限',
+        library: '知识库',
+        document: '文档',
+        tag: '标签',
+        import_task: '导入任务',
+        library_member: '知识库成员',
+        system_setting: '系统设置',
+      } as Record<string, string>
+    )[value || ''] ||
+    value ||
+    '-'
+  )
 }
 
 function resourceText(row: OperationLog) {
@@ -87,7 +127,9 @@ function resourceText(row: OperationLog) {
 /** 将结构化变更信息转换为表格中的简短摘要。 */
 function detailText(detail: Record<string, unknown> | null) {
   if (!detail || !Object.keys(detail).length) return '-'
-  return Object.entries(detail).map(([key, value]) => key + ': ' + String(value)).join('；')
+  return Object.entries(detail)
+    .map(([key, value]) => key + ': ' + String(value))
+    .join('；')
 }
 
 async function loadLogs() {
@@ -130,8 +172,20 @@ function changePageInfo(pageInfo: { current: number; pageSize: number }) {
     </div>
 
     <div class="toolbar log-toolbar">
-      <t-select v-model="resourceType" :options="resourceOptions" placeholder="资源类型" class="log-filter" @change="search" />
-      <t-select v-model="operation" :options="operationOptions" placeholder="操作类型" class="log-filter" @change="search" />
+      <t-select
+        v-model="resourceType"
+        :options="resourceOptions"
+        placeholder="资源类型"
+        class="log-filter"
+        @change="search"
+      />
+      <t-select
+        v-model="operation"
+        :options="operationOptions"
+        placeholder="操作类型"
+        class="log-filter"
+        @change="search"
+      />
     </div>
 
     <div v-if="errorMessage" class="admin-error">
@@ -141,26 +195,44 @@ function changePageInfo(pageInfo: { current: number; pageSize: number }) {
     <div v-if="loading" class="admin-loading">正在加载操作日志...</div>
 
     <div class="panel table-panel">
-      <t-table :data="logs" :columns="columns" row-key="id" :loading="loading" :pagination="{ current: page, pageSize, total, pageSizeOptions: [...PAGINATION.PAGE_SIZES] }" @page-change="changePageInfo">
+      <t-table
+        :data="logs"
+        :columns="columns"
+        row-key="id"
+        :loading="loading"
+        :pagination="{ current: page, pageSize, total, pageSizeOptions: [...PAGINATION.PAGE_SIZES] }"
+        @page-change="changePageInfo"
+      >
         <template #operation="{ row }">
           <t-tag variant="light" theme="primary">{{ operationLabel(row.operation) }}</t-tag>
         </template>
         <template #resource="{ row }">
           <span>{{ resourceText(row) }}</span>
         </template>
-        <template #actor="{ row }">{{ row.user_display_name || (row.user_id ? '用户 #' + row.user_id : '-') }}</template>
+        <template #actor="{ row }">{{
+          row.user_display_name || (row.user_id ? '用户 #' + row.user_id : '-')
+        }}</template>
         <template #ip="{ row }">{{ row.request_ip || '-' }}</template>
-        <template #detail="{ row }"><span class="log-detail">{{ detailText(row.detail) }}</span></template>
+        <template #detail="{ row }"
+          ><span class="log-detail">{{ detailText(row.detail) }}</span></template
+        >
         <template #time="{ row }">{{ formatTime(row.created_at, true) }}</template>
-        <template #totalContent><span class="table-pagination-total">共 {{ total }} 条数据</span></template>
+        <template #totalContent
+          ><span class="table-pagination-total">共 {{ total }} 条数据</span></template
+        >
       </t-table>
     </div>
   </section>
 </template>
 
 <style scoped>
-.log-toolbar { justify-content: flex-start; }
-.log-filter { width: 180px; }
-.log-detail { color: #6b7280; }
-
+.log-toolbar {
+  justify-content: flex-start;
+}
+.log-filter {
+  width: 180px;
+}
+.log-detail {
+  color: var(--muted);
+}
 </style>

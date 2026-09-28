@@ -26,7 +26,7 @@ export type Library = {
   created_at: string
   updated_at: string
   deleted_at: string | null
-  entity_recognition_mode: "disabled" | "required"
+  entity_recognition_mode: 'disabled' | 'required'
   allowed_file_types: string[] | null
   max_file_size_mb: number | null
   max_document_count: number | null
@@ -34,7 +34,7 @@ export type Library = {
   chunking_config: Record<string, unknown> | null
   // 知识库级检索策略：HyDE 由管理端控制，不开放给问答请求
   use_hyde: boolean
-  visibility: "private" | "shared"
+  visibility: 'private' | 'shared'
 }
 
 export type Document = {
@@ -98,7 +98,7 @@ export type Role = {
   code: string
   name: string
   description: string | null
-  status: "active" | "disabled"
+  status: 'active' | 'disabled'
   deleted_at: string | null
   deleted_by: number | null
   permissions: string[]
@@ -109,7 +109,7 @@ export type Permission = {
   code: string
   name: string
   description: string | null
-  status: "active" | "disabled"
+  status: 'active' | 'disabled'
   deleted_at: string | null
   deleted_by: number | null
   parent_id: number | null
@@ -184,7 +184,7 @@ async function requestApi<T>(path: string, options: RequestInit = {}): Promise<T
 
 /** 统一封装管理端用户、权限、知识库和文档接口。 */
 export const mysqlApi = {
-  dashboardOverview: () => requestApi<DashboardOverview>("/api/v1/dashboard/overview"),
+  dashboardOverview: () => requestApi<DashboardOverview>('/api/v1/dashboard/overview'),
   // 用户与访问控制
   listUsers: (params = '') => {
     const query = params ? `?${params}` : ''
@@ -270,7 +270,8 @@ export const mysqlApi = {
   listImportTasks: (params = '') => requestApi<ImportTask[]>('/api/v1/import-tasks' + (params ? '?' + params : '')),
   getImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id),
   retryImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/retry', { method: 'POST' }),
-  cancelImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/cancel', { method: 'POST' }),
+  cancelImportTask: (id: number) =>
+    requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/cancel', { method: 'POST' }),
   confirmImportTaskEntity: (id: number, payload: { item_name?: string | null; no_entity?: boolean }) => {
     return requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/confirm-entity', {
       method: 'POST',
@@ -353,7 +354,8 @@ export const mysqlApi = {
       method: 'PATCH',
       body: JSON.stringify({ value }),
     })
-  },  listLogs: (params = '') => {
+  },
+  listLogs: (params = '') => {
     const query = params ? '?' + params : ''
     return requestApi<OperationLogPage>('/api/v1/operation-logs' + query)
   },

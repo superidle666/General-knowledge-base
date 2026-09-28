@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 系统配置管理接口。
-@author: 项目维护者
-@date: 2026-09-02
-@desc: 仅允许系统管理员读取和更新已注册的系统配置。
-@business: 敏感配置只写不读，接口响应不返回密钥明文。
+仅允许系统管理员读取和更新已注册的系统配置。
+敏感配置只写不读，接口响应不返回密钥明文。
 """
 """Administrator-only encrypted system-setting endpoints."""
 from fastapi import APIRouter, Depends, HTTPException, Request

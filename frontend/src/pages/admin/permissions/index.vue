@@ -6,20 +6,18 @@
  * @BusinessRule: 权限编码由代码注册表维护，页面只允许调整启用状态，不能自由新增或删除。
 -->
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { CheckCircleIcon, ChevronDownIcon, ChevronRightIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Permission } from '../../../api/mysql'
 import { PAGINATION } from '../../../constants'
+import { useRequest } from '../../../composables'
+import { PERMISSION_STATUS_META, getStatusMeta, type StatusMeta } from '../shared/statusMeta'
+import { useAdminCountsStore } from '../../../store/modules/adminCounts'
 
-const emit = defineEmits<{
-  (event: 'update-counts', counts: { permissions: number }): void
-}>()
+const countsStore = useAdminCountsStore()
 
-const permissions = ref<Permission[]>([])
 const expandedParentIds = ref<number[]>([])
-const loading = ref(false)
 const savingPermissionId = ref<number>()
-const errorMessage = ref('')
 const tablePage = ref(1)
 const tablePageSize = ref<number>(PAGINATION.PAGE_SIZE)
 
@@ -57,6 +55,22 @@ const columns = [
   { colKey: 'op', title: '操作', width: 120, align: 'center' },
 ]
 
+/** 加载权限注册表：重置展开状态与页码，并同步侧栏统计。 */
+const permissionsRequest = useRequest(
+  async () => {
+    const data = await mysqlApi.listPermissions()
+    expandedParentIds.value = []
+    tablePage.value = 1
+    countsStore.updateCounts({ permissions: data.length })
+    return data
+  },
+  { immediate: true },
+)
+const permissions = computed(() => permissionsRequest.data.value ?? [])
+const loading = permissionsRequest.loading
+const mutationError = ref('')
+const errorMessage = computed(() => mutationError.value || permissionsRequest.error.value?.message || '')
+
 function isParent(permission: Permission) {
   return permission.parent_id === null
 }
@@ -65,8 +79,9 @@ function childrenOf(parent: Permission) {
   return permissions.value.filter((permission) => permission.parent_id === parent.id)
 }
 
-function getStatusTheme(status: Permission['status']) {
-  return status === 'active' ? 'success' : 'default'
+/** 权限行状态元数据。 */
+function permissionStatusMeta(row: Permission): StatusMeta {
+  return getStatusMeta(PERMISSION_STATUS_META, row.status)
 }
 
 function toggleExpanded(permission: Permission) {
@@ -84,30 +99,21 @@ async function togglePermissionStatus(row: Permission) {
     await mysqlApi.updatePermission(row.id, { status: row.status === 'active' ? 'disabled' : 'active' })
     await loadPermissions()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '权限状态更新失败'
+    mutationError.value = error instanceof Error ? error.message : '权限状态更新失败'
   } finally {
     savingPermissionId.value = undefined
   }
 }
 
+/** 重新加载权限注册表；加载错误由 errorMessage 统一展示。 */
 async function loadPermissions() {
-  loading.value = true
-  errorMessage.value = ''
+  mutationError.value = ''
   try {
-    permissions.value = await mysqlApi.listPermissions()
-    expandedParentIds.value = []
-    tablePage.value = 1
-    emit('update-counts', { permissions: permissions.value.length })
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '权限数据加载失败'
-  } finally {
-    loading.value = false
+    await permissionsRequest.execute()
+  } catch {
+    // 加载错误通过 permissionsRequest.error 在模板中展示
   }
 }
-
-onMounted(() => {
-  void loadPermissions()
-})
 </script>
 
 <template>
@@ -127,7 +133,13 @@ onMounted(() => {
     <div v-if="loading" class="admin-loading">正在加载权限数据...</div>
 
     <div class="panel table-panel">
-      <t-table :data="visiblePermissions" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
+      <t-table
+        :data="visiblePermissions"
+        :columns="columns"
+        row-key="id"
+        :pagination="tablePagination"
+        @page-change="handlePageChange"
+      >
         <template #name="{ row }">
           <div class="permission-name" :class="{ 'permission-name--child': !isParent(row) }">
             <t-button
@@ -145,17 +157,15 @@ onMounted(() => {
             <CheckCircleIcon />
             <strong v-if="isParent(row)">{{ row.name }}</strong>
             <span v-else>{{ row.name }}</span>
-            <t-tag v-if="isParent(row)" size="small" variant="light">
-              {{ childrenOf(row).length }} 项子权限
-            </t-tag>
+            <t-tag v-if="isParent(row)" size="small" variant="light"> {{ childrenOf(row).length }} 项子权限 </t-tag>
           </div>
         </template>
         <template #code="{ row }">
           <code>{{ row.code }}</code>
         </template>
         <template #status="{ row }">
-          <t-tag :theme="getStatusTheme(row.status)" variant="light">
-            {{ row.status === 'active' ? '已启用' : '已停用' }}
+          <t-tag :theme="permissionStatusMeta(row).theme" variant="light">
+            {{ permissionStatusMeta(row).label }}
           </t-tag>
         </template>
         <template #op="{ row }">
@@ -171,8 +181,10 @@ onMounted(() => {
             </t-button>
           </div>
         </template>
-              <template #totalContent><span class="table-pagination-total">共 {{ visiblePermissions.length }} 条数据</span></template>
-</t-table>
+        <template #totalContent
+          ><span class="table-pagination-total">共 {{ visiblePermissions.length }} 条数据</span></template
+        >
+      </t-table>
     </div>
   </section>
 </template>
@@ -196,4 +208,3 @@ onMounted(() => {
   flex: 0 0 auto;
 }
 </style>
-

@@ -1,9 +1,7 @@
 """
 文本向量化工具。
-
-@FilePath: utils/embedding_utils.py
-@Date: 2026-09-07
-@Description: 管理 BGE-M3 Embedding 单例并生成稠密、稀疏向量。
+utils/embedding_utils.py
+管理 BGE-M3 Embedding 单例并生成稠密、稀疏向量。
 """
 
 import threading

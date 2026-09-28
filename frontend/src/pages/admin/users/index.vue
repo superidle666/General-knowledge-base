@@ -6,16 +6,14 @@
  * @BusinessRule: 系统管理员不可编辑或停用
  -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { AddIcon, SearchIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Role } from '../../../api/mysql'
 import { isEmail, isPhone } from '../../../utils/validate'
 import { PAGINATION } from '../../../constants'
-import {
-  isSystemAdminUser,
-  mapUser,
-  type UserRow,
-} from '../shared/formatters'
+import { useRequest } from '../../../composables'
+import { isSystemAdminUser, mapUser, type UserRow } from '../shared/formatters'
+import { useAdminCountsStore } from '../../../store/modules/adminCounts'
 
 type UserForm = {
   username: string
@@ -30,15 +28,10 @@ type UserEditForm = UserForm & {
   status: string
 }
 
-const emit = defineEmits<{
-  (event: 'update-counts', counts: { users: number; roles: number }): void
-}>()
+const countsStore = useAdminCountsStore()
 
-const users = ref<UserRow[]>([])
 const roles = ref<Role[]>([])
 const search = ref('')
-const loading = ref(false)
-const errorMessage = ref('')
 const createError = ref('')
 const editError = ref('')
 const creatingUser = ref(false)
@@ -64,6 +57,24 @@ const columns = [
   { colKey: 'op', title: '操作', width: 220, align: 'center' },
 ]
 
+/** 加载用户与角色数据：用户按系统管理员优先排序，并同步侧栏统计。 */
+const usersRequest = useRequest(
+  async () => {
+    const [userData, roleData] = await Promise.all([mysqlApi.listUsers(), mysqlApi.listRoles()])
+    const sortedUsers = userData
+      .map(mapUser)
+      .sort((left, right) => Number(isSystemAdminUser(right)) - Number(isSystemAdminUser(left)))
+    roles.value = roleData
+    countsStore.updateCounts({ users: sortedUsers.length, roles: roleData.length })
+    return sortedUsers
+  },
+  { immediate: true },
+)
+const users = computed(() => usersRequest.data.value ?? [])
+const loading = usersRequest.loading
+const mutationError = ref('')
+const errorMessage = computed(() => mutationError.value || usersRequest.error.value?.message || '')
+
 const roleOptions = computed(() => {
   return roles.value.map((role) => ({
     label: role.name,
@@ -79,11 +90,7 @@ const filteredUsers = computed(() => {
   }
 
   return users.value.filter((user) => {
-    return [user.name, user.email, user.phone, user.username]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase()
-      .includes(query)
+    return [user.name, user.email, user.phone, user.username].filter(Boolean).join(' ').toLowerCase().includes(query)
   })
 })
 
@@ -134,7 +141,6 @@ function openCreateDialog() {
   showCreateDialog.value = true
 }
 
-
 /** 校验 11 位中国大陆手机号。 */
 function validatePhone(phone: string) {
   if (!phone.trim()) return '请输入手机号。'
@@ -183,32 +189,13 @@ function validateEditUser() {
   return editUser.value.phone.trim() ? validatePhone(editUser.value.phone) : ''
 }
 
-/** 将用户状态映射为 TDesign 标签主题。 */
-function getStatusTheme(row: UserRow) {
-  return row.status === 'active' ? 'success' : 'default'
-}
-
-/** 并行加载用户和角色数据，并同步侧栏统计。 */
+/** 重新加载用户与角色；加载错误由 errorMessage 统一展示。 */
 async function loadUsers() {
-  loading.value = true
-  errorMessage.value = ''
-
+  mutationError.value = ''
   try {
-    const [userData, roleData] = await Promise.all([
-      mysqlApi.listUsers(),
-      mysqlApi.listRoles(),
-    ])
-
-    users.value = userData.map(mapUser).sort((left, right) => Number(isSystemAdminUser(right)) - Number(isSystemAdminUser(left)))
-    roles.value = roleData
-    emit('update-counts', {
-      users: users.value.length,
-      roles: roles.value.length,
-    })
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '用户数据加载失败'
-  } finally {
-    loading.value = false
+    await usersRequest.execute()
+  } catch {
+    // 加载错误通过 usersRequest.error 在模板中展示
   }
 }
 
@@ -292,7 +279,7 @@ async function toggleUserStatus(row: UserRow) {
     await mysqlApi.updateUser(row.id, { status })
     await loadUsers()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '用户状态更新失败'
+    mutationError.value = error instanceof Error ? error.message : '用户状态更新失败'
   } finally {
     updatingUserId.value = undefined
   }
@@ -308,15 +295,11 @@ async function deleteUser(row: UserRow) {
     await mysqlApi.deleteUser(row.id)
     await loadUsers()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '用户删除失败'
+    mutationError.value = error instanceof Error ? error.message : '用户删除失败'
   } finally {
     deletingUserId.value = undefined
   }
 }
-
-onMounted(() => {
-  void loadUsers()
-})
 </script>
 
 <template>
@@ -345,11 +328,16 @@ onMounted(() => {
           <SearchIcon />
         </template>
       </t-input>
-
     </div>
 
     <div class="panel table-panel">
-      <t-table :data="filteredUsers" :columns="columns" row-key="id" :pagination="tablePagination" @page-change="handlePageChange">
+      <t-table
+        :data="filteredUsers"
+        :columns="columns"
+        row-key="id"
+        :pagination="tablePagination"
+        @page-change="handlePageChange"
+      >
         <template #name="{ row }">
           <div class="user-cell">
             <div class="avatar tiny">{{ row.name.slice(0, 1) }}</div>
@@ -357,7 +345,7 @@ onMounted(() => {
           </div>
         </template>
         <template #statusLabel="{ row }">
-          <t-tag :theme="getStatusTheme(row)" variant="light">
+          <t-tag :theme="row.statusTheme" variant="light">
             {{ row.statusLabel }}
           </t-tag>
         </template>
@@ -397,8 +385,10 @@ onMounted(() => {
           </template>
           <span v-else class="protected-label">系统内置</span>
         </template>
-              <template #totalContent><span class="table-pagination-total">共 {{ filteredUsers.length }} 条数据</span></template>
-</t-table>
+        <template #totalContent
+          ><span class="table-pagination-total">共 {{ filteredUsers.length }} 条数据</span></template
+        >
+      </t-table>
     </div>
 
     <t-dialog
@@ -409,21 +399,12 @@ onMounted(() => {
     >
       <div class="dialog-fields">
         <p v-if="createError" class="dialog-form-error">{{ createError }}</p>
-        <t-input
-          v-model="newUser.username"
-          label="登录账号"
-          placeholder="3 至 20 个英文字母，例如：wang"
-        />
+        <t-input v-model="newUser.username" label="登录账号" placeholder="3 至 20 个英文字母，例如：wang" />
         <t-input v-model="newUser.display_name" label="显示名称" placeholder="例如：王工" />
         <t-input v-model="newUser.email" label="邮箱" placeholder="可选" />
         <t-input v-model="newUser.phone" label="手机号" placeholder="请输入 11 位中国大陆手机号" />
         <p class="form-field-tip">初始密码由系统自动设置为：账号前三个字符 + 手机号。</p>
-        <t-select
-          v-model="newUser.role_codes"
-          :options="roleOptions"
-          label="角色"
-          multiple
-        />
+        <t-select v-model="newUser.role_codes" :options="roleOptions" label="角色" multiple />
       </div>
     </t-dialog>
 
@@ -435,26 +416,12 @@ onMounted(() => {
     >
       <div class="dialog-fields">
         <p v-if="editError" class="dialog-form-error">{{ editError }}</p>
-        <t-input
-          v-model="editUser.username"
-          label="登录账号"
-          placeholder="3 至 20 个英文字母"
-        />
+        <t-input v-model="editUser.username" label="登录账号" placeholder="3 至 20 个英文字母" />
         <t-input v-model="editUser.display_name" label="显示名称" />
         <t-input v-model="editUser.email" label="邮箱" />
         <t-input v-model="editUser.phone" label="手机号" placeholder="未登记可留空；填写时须为 11 位中国大陆手机号" />
-        <t-input
-          v-model="editUser.password"
-          type="password"
-          label="重置密码"
-          placeholder="留空表示不修改"
-        />
-        <t-select
-          v-model="editUser.role_codes"
-          :options="roleOptions"
-          label="角色"
-          multiple
-        />
+        <t-input v-model="editUser.password" type="password" label="重置密码" placeholder="留空表示不修改" />
+        <t-select v-model="editUser.role_codes" :options="roleOptions" label="角色" multiple />
         <t-select
           v-model="editUser.status"
           :options="[
@@ -470,7 +437,22 @@ onMounted(() => {
 </template>
 
 <style scoped>
-.user-cell { display: flex; align-items: center; gap: 8px; }
-.user-cell strong { font-size: 12px; }
-.protected-label { display: inline-flex; align-items: center; min-height: 28px; color: #9ca3af; font-size: 11px; font-weight: 400; line-height: 1.4; white-space: nowrap; }
+.user-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.user-cell strong {
+  font-size: 12px;
+}
+.protected-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  color: var(--weak);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.4;
+  white-space: nowrap;
+}
 </style>

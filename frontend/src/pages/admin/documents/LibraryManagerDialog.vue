@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 import { mysqlApi, type Library } from '../../../api/mysql'
 import { PAGINATION } from '../../../constants'
 import { useUserStore } from '../../../store/modules/user'
+import { LIBRARY_STATUS_META, getLifecycleStatusMeta, type StatusMeta } from '../shared/statusMeta'
 
 type EntityRecognitionMode = Library['entity_recognition_mode']
 type LibraryVisibility = Library['visibility']
@@ -27,9 +28,9 @@ const entityModeLabels: Record<EntityRecognitionMode, string> = {
 
 const props = defineProps<{ visible: boolean; libraries: Library[] }>()
 const userStore = useUserStore()
-const entityModeOptions = computed(() => userStore.userInfo?.roles.includes('admin')
-  ? allEntityModeOptions
-  : [allEntityModeOptions[0]])
+const entityModeOptions = computed(() =>
+  userStore.userInfo?.roles.includes('admin') ? allEntityModeOptions : [allEntityModeOptions[0]],
+)
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'updated', library?: Library): void
@@ -68,7 +69,9 @@ const deletingId = ref<number>()
 const errorMessage = ref('')
 const libraryPage = ref(1)
 const libraryPageSize = ref<number>(PAGINATION.PAGE_SIZE)
-const visibleLibraries = computed(() => props.libraries.slice((libraryPage.value - 1) * libraryPageSize.value, libraryPage.value * libraryPageSize.value))
+const visibleLibraries = computed(() =>
+  props.libraries.slice((libraryPage.value - 1) * libraryPageSize.value, libraryPage.value * libraryPageSize.value),
+)
 
 const isSystemAdmin = computed(() => userStore.userInfo?.roles.includes('admin') ?? false)
 
@@ -99,9 +102,10 @@ function startEdit(library: Library) {
   editingId.value = library.id
   editName.value = library.name
   editDescription.value = library.description || ''
-  editEntityMode.value = library.entity_recognition_mode === 'required' && !isSystemAdmin.value
-    ? 'disabled'
-    : library.entity_recognition_mode || 'disabled'
+  editEntityMode.value =
+    library.entity_recognition_mode === 'required' && !isSystemAdmin.value
+      ? 'disabled'
+      : library.entity_recognition_mode || 'disabled'
   editAllowedFileTypes.value = library.allowed_file_types || ['pdf', 'md']
   editMaxFileSizeMb.value = library.max_file_size_mb || undefined
   editMaxDocumentCount.value = library.max_document_count || undefined
@@ -139,9 +143,7 @@ function buildRulePayload(
     max_file_size_mb: maxFileSizeMb || null,
     max_document_count: maxDocumentCount || null,
     max_upload_file_count: maxUploadFileCount || null,
-    chunking_config: chunkSize
-      ? { chunk_size: chunkSize, chunk_overlap: chunkOverlap || 0 }
-      : null,
+    chunking_config: chunkSize ? { chunk_size: chunkSize, chunk_overlap: chunkOverlap || 0 } : null,
     visibility,
     use_hyde: useHyde,
   }
@@ -159,8 +161,10 @@ function validateLibraryForm(
   }
   if (code && (code.length < 2 || code.length > 64)) return '知识库编码长度必须为 2 至 64 个字符。'
   if (chunkSize !== undefined && (!Number.isInteger(chunkSize) || chunkSize < 1)) return '切片长度必须为正整数。'
-  if (chunkOverlap !== undefined && (!Number.isInteger(chunkOverlap) || chunkOverlap < 0)) return '切片重叠必须为非负整数。'
-  if (chunkSize !== undefined && chunkOverlap !== undefined && chunkOverlap >= chunkSize) return '切片重叠必须小于切片长度。'
+  if (chunkOverlap !== undefined && (!Number.isInteger(chunkOverlap) || chunkOverlap < 0))
+    return '切片重叠必须为非负整数。'
+  if (chunkSize !== undefined && chunkOverlap !== undefined && chunkOverlap >= chunkSize)
+    return '切片重叠必须小于切片长度。'
   return ''
 }
 
@@ -170,7 +174,8 @@ function formatLibraryRules(library: Library) {
   const batch = library.max_upload_file_count ? `${library.max_upload_file_count} 个/次` : '未限制批次'
   const visibility = library.visibility === 'shared' ? '共享' : '私有'
   const hyde = library.use_hyde ? 'HyDE已开启' : 'HyDE已关闭'
-  return `${entityModeLabels[library.entity_recognition_mode]} · ${fileTypes} · ${size} · ${batch} · ${visibility} · ${hyde}`
+  const parts = [entityModeLabels[library.entity_recognition_mode], fileTypes, size, batch, visibility, hyde]
+  return parts.join(' · ')
 }
 
 /** 根据名称生成符合后端约束的知识库编码。 */
@@ -303,14 +308,8 @@ async function deleteLibrary(library: Library) {
   }
 }
 
-function getStatusLabel(library: Library) {
-  if (library.deleted_at) return '已删除'
-  return library.status === 'active' ? '已启用' : '已停用'
-}
-
-function getStatusTheme(library: Library): 'danger' | 'success' | 'warning' {
-  if (library.deleted_at) return 'danger'
-  return library.status === 'active' ? 'success' : 'warning'
+function libraryStatusMeta(library: Library): StatusMeta {
+  return getLifecycleStatusMeta(LIBRARY_STATUS_META, library.status, library.deleted_at)
 }
 
 watch(
@@ -322,7 +321,6 @@ watch(
     errorMessage.value = ''
   },
 )
-
 </script>
 
 <template>
@@ -343,55 +341,90 @@ watch(
           <t-select v-model="createEntityMode" :options="entityModeOptions" label="实体识别模式" />
         </div>
         <div class="library-rule-panel">
-          <div class="library-rule-panel-heading"><strong>导入规则</strong><span>规则均为可选；留空表示不额外限制</span></div>
+          <div class="library-rule-panel-heading">
+            <strong>导入规则</strong><span>规则均为可选；留空表示不额外限制</span>
+          </div>
           <div class="library-rule-grid">
-            <t-select v-model="createAllowedFileTypes" :options="fileTypeOptions" label="允许文件类型" multiple clearable />
+            <t-select
+              v-model="createAllowedFileTypes"
+              :options="fileTypeOptions"
+              label="允许文件类型"
+              multiple
+              clearable
+            />
             <t-select v-model="createVisibility" :options="visibilityOptions" label="可见范围" />
-            <t-input-number class="library-rule-number" v-model="createMaxFileSizeMb" label="单文件大小上限（MB）" :min="1" :max="10240" clearable />
-            <t-input-number class="library-rule-number" v-model="createMaxDocumentCount" label="知识库文档总上限" :min="1" clearable />
-            <t-input-number class="library-rule-number" v-model="createMaxUploadFileCount" label="单次上传文件上限" :min="1" clearable />
-            <t-input-number class="library-rule-number" v-model="createChunkSize" label="切片长度（字符）" :min="1" clearable />
-            <t-input-number class="library-rule-number" v-model="createChunkOverlap" label="切片重叠（字符）" :min="0" clearable />
+            <t-input-number
+              class="library-rule-number"
+              v-model="createMaxFileSizeMb"
+              label="单文件大小上限（MB）"
+              :min="1"
+              :max="10240"
+              clearable
+            />
+            <t-input-number
+              class="library-rule-number"
+              v-model="createMaxDocumentCount"
+              label="知识库文档总上限"
+              :min="1"
+              clearable
+            />
+            <t-input-number
+              class="library-rule-number"
+              v-model="createMaxUploadFileCount"
+              label="单次上传文件上限"
+              :min="1"
+              clearable
+            />
+            <t-input-number
+              class="library-rule-number"
+              v-model="createChunkSize"
+              label="切片长度（字符）"
+              :min="1"
+              clearable
+            />
+            <t-input-number
+              class="library-rule-number"
+              v-model="createChunkOverlap"
+              label="切片重叠（字符）"
+              :min="0"
+              clearable
+            />
           </div>
         </div>
         <div class="library-rule-panel">
-          <div class="library-rule-panel-heading"><strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span></div>
+          <div class="library-rule-panel-heading">
+            <strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span>
+          </div>
           <div class="library-hyde-field">
             <span class="library-hyde-label">HyDE 扩展召回</span>
             <t-switch v-model="createUseHyde" :label="['已开启', '已关闭']" />
-            <small class="library-hyde-hint">先让大模型生成假设性答案再检索，可提升召回；代价是该知识库每次问答多一次大模型调用、回答更慢，默认关闭。用户端不再提供该开关。</small>
+            <small class="library-hyde-hint"
+              >先让大模型生成假设性答案再检索，可提升召回；代价是该知识库每次问答多一次大模型调用、回答更慢，默认关闭。用户端不再提供该开关。</small
+            >
           </div>
         </div>
         <t-textarea v-model="createDescription" label="描述" placeholder="知识库用途说明（可选）" />
       </div>
       <div class="library-form-actions">
         <t-button variant="outline" @click="resetCreateForm">清空新增内容</t-button>
-        <t-button theme="primary" :loading="creating" @click="createLibrary">
-          新增知识库
-        </t-button>
+        <t-button theme="primary" :loading="creating" @click="createLibrary"> 新增知识库 </t-button>
       </div>
     </section>
 
     <section class="library-list-section">
       <h3>现有知识库</h3>
       <div class="library-manager-list">
-        <div
-          v-for="library in visibleLibraries"
-          :key="library.id"
-          class="library-manager-entry"
-        >
+        <div v-for="library in visibleLibraries" :key="library.id" class="library-manager-entry">
           <div class="library-manager-item">
             <div>
               <strong>{{ library.name }}</strong>
-               <span>{{ library.code }} · {{ library.document_count }} 篇文档</span>
-               <span class="library-rule-summary">{{ formatLibraryRules(library) }}</span>
-              <p v-if="library.description" class="library-description">
-                说明：{{ library.description }}
-              </p>
+              <span>{{ library.code }} · {{ library.document_count }} 篇文档</span>
+              <span class="library-rule-summary">{{ formatLibraryRules(library) }}</span>
+              <p v-if="library.description" class="library-description">说明：{{ library.description }}</p>
             </div>
             <div class="library-manager-actions">
-              <t-tag :theme="getStatusTheme(library)" variant="light">
-                {{ getStatusLabel(library) }}
+              <t-tag :theme="libraryStatusMeta(library).theme" variant="light">
+                {{ libraryStatusMeta(library).label }}
               </t-tag>
               <template v-if="library.deleted_at">
                 <t-button
@@ -400,22 +433,19 @@ watch(
                   size="small"
                   :loading="changingStatusId === library.id"
                   @click="restoreLibrary(library)"
-                >恢复</t-button>
+                  >恢复</t-button
+                >
               </template>
               <template v-else>
-                <t-button
-                  variant="text"
-                  class="edit-action"
-                  size="small"
-                  @click="startEdit(library)"
-                >编辑</t-button>
+                <t-button variant="text" class="edit-action" size="small" @click="startEdit(library)">编辑</t-button>
                 <t-button
                   variant="text"
                   class="edit-action"
                   size="small"
                   :loading="changingStatusId === library.id"
                   @click="toggleLibraryStatus(library)"
-                >{{ library.status === 'active' ? '停用' : '启用' }}</t-button>
+                  >{{ library.status === 'active' ? '停用' : '启用' }}</t-button
+                >
                 <t-button
                   variant="text"
                   theme="danger"
@@ -424,7 +454,8 @@ watch(
                   :loading="deletingId === library.id"
                   :title="library.document_count > 0 ? '请先迁移或删除知识库中的文档' : '删除空知识库'"
                   @click="deleteLibrary(library)"
-                >删除</t-button>
+                  >删除</t-button
+                >
               </template>
             </div>
           </div>
@@ -437,32 +468,71 @@ watch(
               <t-select v-model="editVisibility" :options="visibilityOptions" label="可见范围" />
             </div>
             <div class="library-rule-panel">
-              <div class="library-rule-panel-heading"><strong>导入规则</strong><span>规则均为可选；留空表示不额外限制</span></div>
+              <div class="library-rule-panel-heading">
+                <strong>导入规则</strong><span>规则均为可选；留空表示不额外限制</span>
+              </div>
               <div class="library-rule-grid">
-                <t-select v-model="editAllowedFileTypes" :options="fileTypeOptions" label="允许文件类型" multiple clearable />
-                <t-input-number class="library-rule-number" v-model="editMaxFileSizeMb" label="单文件大小上限（MB）" :min="1" :max="10240" clearable />
-                <t-input-number class="library-rule-number" v-model="editMaxDocumentCount" label="知识库文档总上限" :min="1" clearable />
-                <t-input-number class="library-rule-number" v-model="editMaxUploadFileCount" label="单次上传文件上限" :min="1" clearable />
-                <t-input-number class="library-rule-number" v-model="editChunkSize" label="切片长度（字符）" :min="1" clearable />
-                <t-input-number class="library-rule-number" v-model="editChunkOverlap" label="切片重叠（字符）" :min="0" clearable />
+                <t-select
+                  v-model="editAllowedFileTypes"
+                  :options="fileTypeOptions"
+                  label="允许文件类型"
+                  multiple
+                  clearable
+                />
+                <t-input-number
+                  class="library-rule-number"
+                  v-model="editMaxFileSizeMb"
+                  label="单文件大小上限（MB）"
+                  :min="1"
+                  :max="10240"
+                  clearable
+                />
+                <t-input-number
+                  class="library-rule-number"
+                  v-model="editMaxDocumentCount"
+                  label="知识库文档总上限"
+                  :min="1"
+                  clearable
+                />
+                <t-input-number
+                  class="library-rule-number"
+                  v-model="editMaxUploadFileCount"
+                  label="单次上传文件上限"
+                  :min="1"
+                  clearable
+                />
+                <t-input-number
+                  class="library-rule-number"
+                  v-model="editChunkSize"
+                  label="切片长度（字符）"
+                  :min="1"
+                  clearable
+                />
+                <t-input-number
+                  class="library-rule-number"
+                  v-model="editChunkOverlap"
+                  label="切片重叠（字符）"
+                  :min="0"
+                  clearable
+                />
               </div>
             </div>
             <div class="library-rule-panel">
-              <div class="library-rule-panel-heading"><strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span></div>
+              <div class="library-rule-panel-heading">
+                <strong>检索规则</strong><span>影响该知识库的问答效果与调用成本</span>
+              </div>
               <div class="library-hyde-field">
                 <span class="library-hyde-label">HyDE 扩展召回</span>
                 <t-switch v-model="editUseHyde" :label="['已开启', '已关闭']" />
-                <small class="library-hyde-hint">开启后每次问答多一次大模型调用，回答更慢、用量更高；用户端不再提供该开关。</small>
+                <small class="library-hyde-hint"
+                  >开启后每次问答多一次大模型调用，回答更慢、用量更高；用户端不再提供该开关。</small
+                >
               </div>
             </div>
             <t-textarea v-model="editDescription" label="描述" />
             <div class="library-form-actions">
               <t-button variant="outline" @click="cancelEdit">取消</t-button>
-              <t-button
-                theme="primary"
-                :loading="savingEdit"
-                @click="saveLibraryEdit"
-              >保存修改</t-button>
+              <t-button theme="primary" :loading="savingEdit" @click="saveLibraryEdit">保存修改</t-button>
             </div>
           </div>
         </div>
@@ -482,31 +552,142 @@ watch(
 </template>
 
 <style scoped>
-.library-create-section, .library-list-section { display: grid; min-width: 0; gap: 12px; }
-.library-create-section { padding-bottom: 20px; border-bottom: 1px solid #e5e7eb; }
-.library-list-section { padding-top: 18px; }
-.library-create-section h3, .library-list-section h3 { margin: 0; color: #1f2937; font-size: 14px; font-weight: 600; }
-.library-basic-grid, .library-rule-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.library-rule-panel { display: grid; gap: 12px; padding: 14px; border: 1px solid #dbeafe; border-radius: 6px; background: #f8fbff; }
-.library-rule-panel-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.library-rule-panel-heading strong { color: #334155; font-size: 13px; }
-.library-rule-panel-heading span { color: #64748b; font-size: 11px; }
-.library-manager-list { display: grid; gap: 8px; max-height: min(48vh, 420px); overflow-y: auto; padding: 2px; }
-.library-manager-entry { box-sizing: border-box; min-width: 0; border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; }
-.library-manager-item { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-height: 40px; padding: 10px 12px; }
-.library-inline-edit { display: grid; gap: 12px; min-width: 0; padding: 14px 12px; border-top: 1px solid #e5e7eb; background: #f8fafc; }
-.library-inline-edit h4 { margin: 0; color: #374151; font-size: 13px; font-weight: 600; }
-.library-form-actions, .library-manager-actions { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
-.library-manager-item > div:first-child { display: grid; flex: 1 1 auto; min-width: 0; gap: 3px; }
-.library-manager-item strong { font-size: 13px; }
-.library-manager-item span { overflow: hidden; color: #9ca3af; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.library-manager-item .library-rule-summary { color: #64748b; }
-.library-rule-number { width: 100%; }
-.library-hyde-field { display: grid; gap: 6px; align-content: start; }
-.library-hyde-label { color: rgb(0 10 31 / 85%); font-size: 14px; line-height: 22px; }
-.library-hyde-hint { color: #64748b; font-size: 11px; line-height: 1.5; }
-.library-rule-number :deep(.t-input-number) { width: 100%; padding: 0 28px; }
-.library-rule-number :deep(.t-input-number__decrease), .library-rule-number :deep(.t-input-number__increase) {
+.library-create-section,
+.library-list-section {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+.library-create-section {
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--border);
+}
+.library-list-section {
+  padding-top: 18px;
+}
+.library-create-section h3,
+.library-list-section h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+}
+.library-basic-grid,
+.library-rule-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.library-rule-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--primary-soft);
+  border-radius: 6px;
+  background: var(--surface-alt);
+}
+.library-rule-panel-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.library-rule-panel-heading strong {
+  color: var(--text-soft);
+  font-size: 13px;
+}
+.library-rule-panel-heading span {
+  color: var(--muted);
+  font-size: 11px;
+}
+.library-manager-list {
+  display: grid;
+  gap: 8px;
+  max-height: min(48vh, 420px);
+  overflow-y: auto;
+  padding: 2px;
+}
+.library-manager-entry {
+  box-sizing: border-box;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.library-manager-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 10px 12px;
+}
+.library-inline-edit {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+.library-inline-edit h4 {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+.library-form-actions,
+.library-manager-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.library-manager-item > div:first-child {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 3px;
+}
+.library-manager-item strong {
+  font-size: 13px;
+}
+.library-manager-item span {
+  overflow: hidden;
+  color: var(--weak);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.library-manager-item .library-rule-summary {
+  color: var(--muted);
+}
+.library-rule-number {
+  width: 100%;
+}
+.library-hyde-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+.library-hyde-label {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 22px;
+}
+.library-hyde-hint {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.library-rule-number :deep(.t-input-number) {
+  width: 100%;
+  padding: 0 28px;
+}
+.library-rule-number :deep(.t-input-number__decrease),
+.library-rule-number :deep(.t-input-number__increase) {
   width: 28px;
   height: 32px;
   padding: 0;
@@ -518,13 +699,59 @@ watch(
   flex: 0 0 28px;
   line-height: 1;
 }
-.library-rule-number :deep(.t-input-number__decrease) { left: 0; }
-.library-rule-number :deep(.t-input-number__increase) { right: 0; }
-.library-rule-number :deep(.t-input-number__decrease .t-button__icon), .library-rule-number :deep(.t-input-number__increase .t-button__icon) { margin: 0; }
-.library-rule-number :deep(.t-input) { width: 100%; min-width: 0; }
-.library-rule-number :deep(.t-input__inner) { text-align: center; }
-.library-description { display: -webkit-box; margin: 2px 0 0; overflow: hidden; color: #6b7280; font-size: 12px; line-height: 1.5; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.empty-state { color: #9ca3af; font-size: 12px; }
-.dialog-pagination { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e5e7eb; color: #6b7280; font-size: 12px; }
-@media (max-width: 680px) { .library-basic-grid, .library-rule-grid { grid-template-columns: 1fr; } .library-manager-item { flex-direction: column; } .library-manager-actions { width: 100%; justify-content: flex-start; } }
+.library-rule-number :deep(.t-input-number__decrease) {
+  left: 0;
+}
+.library-rule-number :deep(.t-input-number__increase) {
+  right: 0;
+}
+.library-rule-number :deep(.t-input-number__decrease .t-button__icon),
+.library-rule-number :deep(.t-input-number__increase .t-button__icon) {
+  margin: 0;
+}
+.library-rule-number :deep(.t-input) {
+  width: 100%;
+  min-width: 0;
+}
+.library-rule-number :deep(.t-input__inner) {
+  text-align: center;
+}
+.library-description {
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.empty-state {
+  color: var(--weak);
+  font-size: 12px;
+}
+.dialog-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
+@media (max-width: 680px) {
+  .library-basic-grid,
+  .library-rule-grid {
+    grid-template-columns: 1fr;
+  }
+  .library-manager-item {
+    flex-direction: column;
+  }
+  .library-manager-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
 </style>

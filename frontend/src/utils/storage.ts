@@ -11,7 +11,7 @@ export function set<T>(key: string, value: T): void {
 export function get<T>(key: string, defaultValue: T | null = null): T | null {
   try {
     const value = localStorage.getItem(key)
-    return value === null ? defaultValue : JSON.parse(value) as T
+    return value === null ? defaultValue : (JSON.parse(value) as T)
   } catch {
     return defaultValue
   }
