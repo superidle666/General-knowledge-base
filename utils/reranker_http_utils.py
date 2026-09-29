@@ -9,6 +9,7 @@ import math
 import dashscope
 from dotenv import load_dotenv
 from config.reranker_config import reranker_config
+from utils.runtime_settings import get_runtime_setting
 
 load_dotenv()
 
@@ -42,15 +43,17 @@ def rerank_documents(query: str, documents: list[str]) -> list[float]:
     if not documents:
         return []
 
-    dashscope.api_key = reranker_config.text_rerank_api_key
+    # 库配置优先、env 兜底：重排是每次检索的按需调用，管理端保存即生效；
+    # 密钥与聊天模型共用同一个 DashScope 账号（model.chat_api_key）。
+    dashscope.api_key = get_runtime_setting("model.chat_api_key") or reranker_config.text_rerank_api_key
     try:
         response = dashscope.TextReRank.call(
-            model=reranker_config.text_rerank_model,
+            model=get_runtime_setting("rerank.text_model") or reranker_config.text_rerank_model,
             query=query,
             documents=documents,
             top_n=len(documents),
             return_documents=False,
-            instruct=reranker_config.text_rerank_instruct,
+            instruct=get_runtime_setting("rerank.text_instruct") or reranker_config.text_rerank_instruct,
         )
     except RerankError:
         raise

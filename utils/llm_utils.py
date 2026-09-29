@@ -3,10 +3,12 @@
 utils/llm_utils.py
 按模型和输出模式缓存 ChatOpenAI 客户端，避免重复初始化连接。
 """
+import hashlib
 
 from langchain_openai import ChatOpenAI
 
 from config.lm_config import lm_config
+from utils.runtime_settings import get_runtime_setting
 
 _llm_client_cache = {}
 
@@ -24,8 +26,14 @@ def get_llm_client(
     - timeout: 单次请求超时秒数；同步检索链路用它兜住外部调用，避免卡住整个问答
     - max_retries: 失败重试次数；与 timeout 配合限定最坏情况耗时
     """
-    m = model or lm_config.llm_model
-    key = (m, json_mode, timeout, max_retries)
+    # 库配置优先、env 兜底（P0-1）：管理端保存的聊天模型三项在此生效，
+    # 读不到快照（未配置/Redis 故障）时 get_runtime_setting 返回 None，行为与接线前一致。
+    api_key = get_runtime_setting("model.chat_api_key") or lm_config.api_key
+    base_url = get_runtime_setting("model.chat_base_url") or lm_config.base_url
+    m = model or get_runtime_setting("model.chat_model") or lm_config.llm_model
+    # 缓存 key 必须纳入实际生效的凭证：只含模型名的话，改了地址/密钥后旧 client 永远命中缓存。
+    credential_digest = hashlib.sha1(f"{api_key}|{base_url}".encode("utf-8")).hexdigest()
+    key = (m, json_mode, timeout, max_retries, credential_digest)
     if key in _llm_client_cache:
         return _llm_client_cache[key]
 
@@ -38,8 +46,8 @@ def get_llm_client(
     client_kwargs: dict = {
         "model": m,
         "temperature": lm_config.llm_temperature,
-        "api_key": lm_config.api_key,
-        "base_url": lm_config.base_url,
+        "api_key": api_key,
+        "base_url": base_url,
         "extra_body": extra_body,
         "model_kwargs": model_kwargs,
     }

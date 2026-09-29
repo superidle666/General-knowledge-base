@@ -5,15 +5,20 @@
 敏感配置只写不读，接口响应不返回密钥明文。
 """
 """Administrator-only encrypted system-setting endpoints."""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.schemas import SystemSettingOut, SystemSettingUpdate
 from backend.app.core.audit import bind_audit_context, log_operation
 from backend.app.core.auth import AuthenticatedUser, get_current_user
-from backend.app.core.system_settings import decrypt_value, encrypt_value, mask_value, setting_spec, validate_value
+from backend.app.core.system_settings import SETTING_SPECS, decrypt_value, encrypt_value, mask_value, setting_spec, validate_value
 from backend.app.db.models import SystemSetting
 from backend.app.db.session import get_db
+from utils.runtime_settings import publish_settings_snapshot
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/api/v1/settings', tags=['system-settings'])
 
@@ -38,7 +43,9 @@ def serialize(item: SystemSetting) -> dict:
 @router.get('', response_model=list[SystemSettingOut])
 async def list_settings(session: AsyncSession = Depends(get_db), _: AuthenticatedUser = Depends(require_system_admin)):
     rows = (await session.execute(select(SystemSetting).order_by(SystemSetting.category, SystemSetting.id))).scalars()
-    return [serialize(item) for item in rows]
+    # 只展示注册表内的项：启动清理前的孤儿行（已下线配置）不该继续暴露一个 PATCH 必 404 的假入口。
+    registered = {item['key'] for item in SETTING_SPECS}
+    return [serialize(item) for item in rows if item.setting_key in registered]
 
 @router.patch('/{setting_key}', response_model=SystemSettingOut)
 async def update_setting(setting_key: str, payload: SystemSettingUpdate, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(require_system_admin)):
@@ -57,4 +64,10 @@ async def update_setting(setting_key: str, payload: SystemSettingUpdate, session
     await log_operation(session, 'update', 'system_setting', setting_key, {'key': setting_key, 'sensitive': spec['sensitive']})
     await session.commit()
     await session.refresh(item)
+    # 保存成功后刷新运行时快照（P0-1）：DB 是事实源已落库，发布失败只影响生效时点，
+    # 下次启动或再次保存会自愈，不能让 Redis 故障反过来置已成功的保存于失败。
+    try:
+        await publish_settings_snapshot(session)
+    except Exception:
+        logger.error('系统设置已保存但运行时快照发布失败：%s', setting_key, exc_info=False)
     return serialize(item)

@@ -23,6 +23,7 @@ from processor.import_processor.base import BaseNode, setup_logging
 from processor.import_processor.exceptions import StateFieldError, FileProcessingError
 from processor.import_processor.state import ImportGraphState
 from utils.minio_utils import get_minio_client
+from utils.runtime_settings import get_runtime_setting
 
 # 单次图片摘要请求的超时上限（秒）。原先不传 timeout，走 openai SDK 默认的 600 秒，
 # 再叠上默认重试，一张卡住不响应的图片就能挂住 Worker 将近半小时。这里取 60 秒；
@@ -259,12 +260,15 @@ class NodeMDImg(BaseNode):
         extra_body={"enable_thinking": False}（文本模型用），而多模态端点是否接受该
         参数未经验证——一旦被拒，失败会被下面的 except 吞成“图片描述”，变成没人看见的
         静默劣化。本项只修建连复用与超时，不动请求体。
+
+        模型名/地址/密钥按 P0-1 口径取：管理端系统设置优先，读不到时回落 lm_config（env）；
+        参数集仍保持 {model, api_key, base_url, temperature, timeout} 不变。
         """
         if self._chat_model is None:
             self._chat_model = ChatOpenAI(
-                model=lm_config.vl_model,
-                api_key=lm_config.api_key,
-                base_url=lm_config.base_url,
+                model=get_runtime_setting("model.vl_model") or lm_config.vl_model,
+                api_key=get_runtime_setting("model.chat_api_key") or lm_config.api_key,
+                base_url=get_runtime_setting("model.chat_base_url") or lm_config.base_url,
                 temperature=lm_config.llm_temperature,
                 timeout=VL_REQUEST_TIMEOUT_SECONDS,
             )

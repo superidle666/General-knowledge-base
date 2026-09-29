@@ -19,6 +19,7 @@ from backend.app.core.permissions import sync_permission_registry
 from backend.app.core.system_settings import sync_system_settings
 from backend.app.db.session import SessionLocal
 from tool.logger import configure_logging, logger
+from utils.runtime_settings import publish_settings_snapshot
 
 
 @asynccontextmanager
@@ -35,6 +36,11 @@ async def lifespan(_: FastAPI):
     async with SessionLocal() as session:
         await sync_permission_registry(session)
         await sync_system_settings(session)
+        # 启动时发布运行时快照（P0-1）：自愈 PATCH 发布失败/换 Redis 等场景；Redis 不可用不阻断启动。
+        try:
+            await publish_settings_snapshot(session)
+        except Exception:
+            logger.warning("启动时发布系统设置快照失败，运行时暂用环境变量，保存任一设置或重启后自愈", exc_info=False)
     logger.info("API 启动完成：%s", settings.app_name)
     yield
 

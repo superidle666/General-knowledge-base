@@ -11,6 +11,7 @@ from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 
 from config.embedding_config import embedding_config
 from tool.logger import logger
+from utils.runtime_settings import get_runtime_setting
 
 # 此处曾在模块导入期调用 setup_logging()：任何 import 本文件的进程（包括问答 API）
 # 都会被顺手重置根日志器，还让 utils 反向依赖了 processor.*。日志配置只由进程入口做。
@@ -40,10 +41,12 @@ def get_bge_m3_ef():
         if _bge_m3_ef is not None:
             return _bge_m3_ef
 
-        # 从环境变量加载配置
-        model_name = embedding_config.bge_m3_path
-        device = embedding_config.bge_device
-        use_fp16 = embedding_config.bge_fp16
+        # 配置优先级：管理端系统设置 > .env（embedding_config）。模型加载后常驻内存，
+        # 改动只在「重启后首次加载」这一刻被读到；设置页的描述已标明这一语义。
+        model_name = get_runtime_setting("embedding.model_path") or embedding_config.bge_m3_path
+        device = get_runtime_setting("embedding.device") or embedding_config.bge_device
+        fp16_setting = get_runtime_setting("embedding.fp16")
+        use_fp16 = (fp16_setting in ("1", "True", "true")) if fp16_setting else embedding_config.bge_fp16
 
         logger.info(
             "首次加载 BGE-M3 模型（其他线程会等待）：model=%s device=%s fp16=%s",
