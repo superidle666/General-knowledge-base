@@ -39,8 +39,14 @@ const emit = defineEmits<{
 const route = useRoute()
 const router = useRouter()
 
-/** 当前模块由子路由名派生（admin-documents → documents）。 */
-const activeNav = computed(() => String(route.name ?? '').replace(/^admin-/, '') as NavKey)
+/** 子路由名→导航 key 的别名归一：知识库详情页高亮「知识库」入口。 */
+const NAV_ALIAS: Record<string, NavKey> = { 'library-detail': 'libraries' }
+
+/** 当前模块由子路由名派生（admin-libraries → libraries），再经别名归一。 */
+const activeNav = computed(() => {
+  const raw = String(route.name ?? '').replace(/^admin-/, '')
+  return (NAV_ALIAS[raw] ?? raw) as NavKey
+})
 
 /** 导航到模块子路由；非展开项选中后收起移动抽屉，“用户管理”保持原展开切换语义。 */
 function handleNav(key: NavKey) {

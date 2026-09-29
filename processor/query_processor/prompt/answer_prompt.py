@@ -1,9 +1,9 @@
 """
 答案生成提示词模板。
 
-@FilePath: processor/query_processor/prompt/answer_prompt.py
-@Date: 2026-09-07
-@Description: 约束模型基于召回内容回答，并按当前问题选择相关图片和引用位置；图片链接必须原样来自参考内容，禁止臆造。
+processor/query_processor/prompt/answer_prompt.py
+
+约束模型基于召回内容回答，并按当前问题选择相关图片和引用位置；图片链接必须原样来自参考内容，禁止臆造。
 """
 
 # 回答生成提示词

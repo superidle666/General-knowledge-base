@@ -4,7 +4,7 @@
  * @Description: 用户端登录页面，负责账号认证和登录后跳转。
  -->
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { LockOnIcon, UserIcon } from 'tdesign-icons-vue-next'
 import { useUserStore } from '../../store/modules/user'
@@ -18,11 +18,7 @@ const rememberLogin = ref(true)
 const loginError = ref('')
 const loginLoading = ref(false)
 
-const subtitle = computed(() =>
-  route.query.reason === 'anonymous-limit'
-    ? '匿名体验已达到 3 条消息，请登录后继续咨询。'
-    : '登录后即可继续使用工智库进行技术咨询。',
-)
+const subtitle = '登录后即可继续使用工智库进行技术咨询。'
 
 function getRedirectPath() {
   const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/'
@@ -83,8 +79,6 @@ async function login() {
         <div v-if="loginError" class="user-login-error" role="alert">{{ loginError }}</div>
         <t-button theme="primary" block size="large" type="submit" :loading="loginLoading">登录并继续</t-button>
       </t-form>
-
-      <t-button variant="text" block @click="router.replace('/')">暂不登录，返回用户端</t-button>
     </section>
     <p class="user-login-footer">工智库 · 本地知识库问答</p>
   </main>

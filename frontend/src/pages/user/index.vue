@@ -43,6 +43,9 @@ const inputText = ref('')
 const libraries = ref<UserLibrary[]>([])
 const libraryError = ref('')
 const anonymousLimitDialogVisible = ref(false)
+// 删除会话确认对话框（取代浏览器原生 confirm）
+const deleteConfirmVisible = ref(false)
+const pendingDeleteItems = ref<UserConversation[]>([])
 const libraryExpanded = ref(true)
 // 联网搜索留给用户选择（会引入外部资料，需用户知情）；HyDE 是知识库级策略，由管理端配置
 const useWebSearch = ref(false)
@@ -306,8 +309,7 @@ async function renameConversation(item: UserConversation) {
   }
 }
 
-async function deleteConversation(item: UserConversation) {
-  if (!window.confirm(`确定删除会话“${item.title}”吗？`)) return
+async function performDeleteConversation(item: UserConversation) {
   try {
     await deleteQuerySession(item.id)
     querySessions.value = querySessions.value.filter((session) => session.id !== item.id)
@@ -332,9 +334,8 @@ function toggleSidebarCollapse() {
 }
 
 /** 批量删除已选会话：逐个调后端删除接口；部分失败时已删的仍同步移出列表，再提示错误。 */
-async function batchDeleteConversations(items: UserConversation[]) {
+async function performBatchDeleteConversations(items: UserConversation[]) {
   if (items.length === 0) return
-  if (!window.confirm(`确定删除选中的 ${items.length} 个会话吗？删除后不可恢复。`)) return
   const deletedIds = new Set<string>()
   try {
     for (const item of items) {
@@ -351,6 +352,36 @@ async function batchDeleteConversations(items: UserConversation[]) {
     selectedHistoryItemId.value = null
     await loadConversationsForCurrentLibrary()
   }
+}
+
+/** 删除确认对话框的提示文案：单条带会话名，多条显示数量。 */
+const deleteConfirmText = computed(() =>
+  pendingDeleteItems.value.length === 1
+    ? `确定删除会话“${pendingDeleteItems.value[0].title}”吗？删除后不可恢复。`
+    : `确定删除选中的 ${pendingDeleteItems.value.length} 个会话吗？删除后不可恢复。`,
+)
+
+/** 弹出单条会话删除确认。 */
+function requestDeleteConversation(item: UserConversation) {
+  pendingDeleteItems.value = [item]
+  deleteConfirmVisible.value = true
+}
+
+/** 弹出批量会话删除确认。 */
+function requestBatchDelete(items: UserConversation[]) {
+  if (items.length === 0) return
+  pendingDeleteItems.value = items
+  deleteConfirmVisible.value = true
+}
+
+/** 确认删除：关闭对话框后按单条/批量执行实际删除。 */
+async function confirmDeleteConversations() {
+  const items = pendingDeleteItems.value
+  deleteConfirmVisible.value = false
+  pendingDeleteItems.value = []
+  if (items.length === 0) return
+  if (items.length === 1) await performDeleteConversation(items[0])
+  else await performBatchDeleteConversations(items)
 }
 
 /** 在顶部展示一条会自动消失的知识库提示。 */
@@ -495,8 +526,8 @@ onMounted(loadLibraries)
       @select-library="selectLibrary"
       @select-conversation="selectConversation"
       @rename-conversation="renameConversation"
-      @delete-conversation="deleteConversation"
-      @batch-delete-conversations="batchDeleteConversations"
+      @delete-conversation="requestDeleteConversation"
+      @batch-delete-conversations="requestBatchDelete"
       @update:search-query="searchQuery = $event"
       @close-mobile="mobileSidebarOpen = false"
       @toggle-collapse="toggleSidebarCollapse"
@@ -542,6 +573,15 @@ onMounted(loadLibraries)
       @confirm="confirmLoginAfterLimit"
     >
       <p>匿名体验已使用 3 条消息。登录后可继续使用知识库问答功能。</p>
+    </t-dialog>
+    <t-dialog
+      v-model:visible="deleteConfirmVisible"
+      header="删除会话"
+      :confirm-btn="{ content: '删除', theme: 'danger' }"
+      cancel-btn="取消"
+      @confirm="confirmDeleteConversations"
+    >
+      <p>{{ deleteConfirmText }}</p>
     </t-dialog>
   </UserLayout>
 </template>

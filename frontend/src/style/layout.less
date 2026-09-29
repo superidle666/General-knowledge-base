@@ -76,6 +76,7 @@
   font-size: 13px;
   margin: 0;
 }
+/* 管理端按钮：图标与文字统一垂直居中、等距，兼容 #icon 插槽与默认插槽两种写法 */
 .admin-page-head .t-button,
 .admin-content .t-button {
   display: inline-flex;
@@ -85,20 +86,28 @@
   white-space: nowrap;
 }
 .admin-page-head .t-button__text,
-.admin-page-head .t-button__content {
+.admin-page-head .t-button__content,
+.admin-content .t-button__text,
+.admin-content .t-button__content {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   white-space: nowrap;
 }
 .admin-page-head .t-button__text > svg,
-.admin-page-head .t-button__content > svg {
+.admin-page-head .t-button__content > svg,
+.admin-content .t-button__text > svg,
+.admin-content .t-button__content > svg {
   flex: 0 0 auto;
   vertical-align: middle;
 }
-.admin-page-head .t-button .t-icon {
+.admin-page-head .t-button .t-icon,
+.admin-content .t-button .t-icon {
   flex: 0 0 auto;
-  margin-right: 6px;
+}
+/* #icon 插槽写法下图标是 .t-button__text 的兄弟，间距已由按钮 gap 提供，去掉组件默认 margin 防止叠加 */
+.admin-content .t-button .t-icon + .t-button__text {
+  margin-left: 0;
 }
 .admin-page-actions {
   display: flex;

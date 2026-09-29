@@ -1,4 +1,4 @@
-<!-- 文档详情弹窗，展示元数据、标签和当前已有的 Chunk。 -->
+<!-- 文档详情弹窗，展示元数据与当前已有的 Chunk。 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { marked } from 'marked'
@@ -17,12 +17,8 @@ const detail = ref<Document>()
 const chunks = ref<DocumentChunk[]>([])
 const loading = ref(false)
 const savingTitle = ref(false)
-const savingTags = ref(false)
 const errorMessage = ref('')
 const titleInput = ref('')
-const tagOptions = ref<Array<{ label: string; value: string }>>([])
-const selectedTags = ref<string[]>([])
-const tagSearch = ref('')
 const chunkSearch = ref('')
 const expandedChunkIds = ref<number[]>([])
 
@@ -62,10 +58,6 @@ async function loadDetail() {
     detail.value = await mysqlApi.getDocument(props.documentId)
     titleInput.value = detail.value.title
     chunks.value = await mysqlApi.listChunks(props.documentId)
-    selectedTags.value = detail.value.tags || []
-    const tags = await mysqlApi.listTags()
-    tagOptions.value = tags.map((tag) => ({ label: tag.name, value: tag.name }))
-    tagSearch.value = ''
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '文档详情加载失败'
   } finally {
@@ -148,48 +140,6 @@ async function saveTitle() {
   }
 }
 
-/** 记录标签选择器输入，用于提示尚未创建的标签。 */
-function handleTagInput(value: string) {
-  tagSearch.value = value
-}
-
-/** 将首次输入的标签加入选中项，保存时由后端完成标签创建。 */
-function handleTagCreate(value: string) {
-  const name = value.trim()
-  if (!name || selectedTags.value.includes(name)) return
-  selectedTags.value = [...selectedTags.value, name]
-  tagSearch.value = ''
-}
-
-function isUnknownTag(value: string) {
-  const name = value.trim()
-  return Boolean(name) && !tagOptions.value.some((option) => option.value === name)
-}
-
-async function saveTags() {
-  if (!detail.value) return
-
-  const names = Array.from(new Set([...selectedTags.value, tagSearch.value].map((item) => item.trim()).filter(Boolean)))
-  if (names.length > 30) {
-    errorMessage.value = '每个文档最多可关联 30 个标签。'
-    return
-  }
-
-  errorMessage.value = ''
-  savingTags.value = true
-  try {
-    selectedTags.value = names
-    detail.value = await mysqlApi.updateDocumentTags(detail.value.id, names)
-    const tags = await mysqlApi.listTags()
-    tagOptions.value = tags.map((tag) => ({ label: tag.name, value: tag.name }))
-    emit('updated')
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '标签保存失败'
-  } finally {
-    savingTags.value = false
-  }
-}
-
 watch(
   () => [props.visible, props.documentId],
   ([visible]) => {
@@ -219,20 +169,6 @@ watch(
           状态：{{ formatDocumentStatus(detail.status) }}　大小：
           {{ formatFileSize(detail.file_size) }}
         </p>
-        <div class="dialog-fields">
-          <p v-if="isUnknownTag(tagSearch)" class="tag-create-hint">该标签未被创建, 使用该标签会自动创建标签</p>
-          <t-select
-            v-model="selectedTags"
-            :options="tagOptions"
-            multiple
-            filterable
-            creatable
-            placeholder="选中或者输入标签"
-            @input-change="handleTagInput"
-            @create="handleTagCreate"
-          />
-          <t-button theme="primary" variant="outline" :loading="savingTags" @click="saveTags"> 保存标签 </t-button>
-        </div>
         <div class="chunk-section-header">
           <div>
             <h3>导入 Chunk（{{ chunks.length }}）</h3>

@@ -1,9 +1,9 @@
 """
 外部搜索补充节点。
 
-@FilePath: processor/query_processor/nodes/node_web_search_mcp.py
-@Date: 2026-09-07
-@Description: 通过 MCP 搜索服务补充联网结果，并将结果转换为统一检索文档结构。
+processor/query_processor/nodes/node_web_search_mcp.py
+
+通过 MCP 搜索服务补充联网结果，并将结果转换为统一检索文档结构。
 """
 import asyncio
 import json

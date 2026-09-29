@@ -32,8 +32,7 @@ const ADMIN_DARK_MODE_KEY = STORAGE_KEY.ADMIN_DARK_MODE
 
 const allNavItems = [
   { key: 'dashboard' as const, label: '仪表盘', icon: DashboardIcon },
-  { key: 'libraries' as const, label: '知识库管理', icon: FileIcon },
-  { key: 'documents' as const, label: '文档管理', icon: FileIcon },
+  { key: 'libraries' as const, label: '知识库', icon: FileIcon },
   { key: 'users' as const, label: '用户管理', icon: UsergroupIcon },
   { key: 'sessions' as const, label: '操作日志', icon: ChatIcon },
   { key: 'settings' as const, label: '系统设置', icon: SettingIcon },

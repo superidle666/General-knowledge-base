@@ -30,13 +30,18 @@ const router = createRouter({
           path: 'libraries',
           name: 'admin-libraries',
           component: () => import('../pages/admin/libraries/index.vue'),
-          meta: { title: '知识库管理' },
+          meta: { title: '知识库' },
         },
         {
+          path: 'libraries/:libraryId(\\d+)',
+          name: 'admin-library-detail',
+          component: () => import('../pages/admin/libraries/LibraryDetail.vue'),
+          meta: { title: '知识库详情' },
+        },
+        {
+          // 兼容旧链接：功能已合入「知识库」模块，query 透传由列表页兼容层消费。
           path: 'documents',
-          name: 'admin-documents',
-          component: () => import('../pages/admin/documents/index.vue'),
-          meta: { title: '文档管理' },
+          redirect: (to) => ({ name: 'admin-libraries', query: to.query }),
         },
         {
           path: 'users',

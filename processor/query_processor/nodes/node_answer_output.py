@@ -1,8 +1,8 @@
 """
 答案生成与输出节点。
 
-@FilePath: processor/query_processor/nodes/node_answer_output.py
-@Date: 2026-09-07
+processor/query_processor/nodes/node_answer_output.py
+
 @Description: 组装问答提示词、调用模型生成答案、筛选回答引用图片并发送最终结果。
 @BusinessRule: 图片只能返回模型明确引用且来自当前召回内容的 URL；
               白名单外的 markdown 图片（模型臆造的 URL）要从答案正文中剜除，

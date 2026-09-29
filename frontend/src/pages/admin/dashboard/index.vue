@@ -100,7 +100,7 @@ async function loadOverview() {
         <h1>仪表盘</h1>
         <p>欢迎回来，系统管理员。这里是知识库运行概况。</p>
       </div>
-      <t-button theme="primary" @click="router.push({ name: 'admin-documents' })"><FileIcon />管理文档</t-button>
+      <t-button theme="primary" @click="router.push({ name: 'admin-libraries' })"><FileIcon />管理知识库</t-button>
     </div>
     <div v-if="errorMessage" class="admin-error">{{ errorMessage }}<button @click="loadOverview">重试</button></div>
     <div v-if="loading" class="admin-loading">正在加载仪表盘数据...</div>
@@ -144,7 +144,7 @@ async function loadOverview() {
             variant="text"
             size="small"
             class="library-detail-button"
-            @click="router.push({ name: 'admin-documents' })"
+            @click="router.push({ name: 'admin-libraries' })"
             ><span>查看详情</span><ChevronRightIcon
           /></t-button>
         </div>

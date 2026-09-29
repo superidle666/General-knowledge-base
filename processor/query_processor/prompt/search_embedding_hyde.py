@@ -1,9 +1,8 @@
 """
 HyDE 提示词模板。
+ processor/query_processor/prompt/search_embedding_hyde.py
 
-@FilePath: processor/query_processor/prompt/search_embedding_hyde.py
-@Date: 2026-09-07
-@Description: 指导模型生成用于向量检索的简洁假设性回答。
+指导模型生成用于向量检索的简洁假设性回答。
 """
 HYDE_PROMPT = """
 请基于以下用户查询生成一个简洁的回答范文。
