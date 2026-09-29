@@ -4,6 +4,7 @@
  * @Date: 2026-09-28
  * @Description: 知识库详情页壳：头部信息 + 「文档/配置」双 Tab + 上传弹窗，对齐 RAGFlow Dataset 页组织方式。
  * @BusinessRule: 路由 /admin/libraries/:libraryId 仅接受数字 id；?tab=config 深链直达配置；?upload=1 为一次性上传信号，消费后剥离。
+ *   骨架屏只在首屏（尚无库数据）出现：重刷时内容区必须保持挂载，否则会把子组件状态（弹窗、Tab、分页、搜索词）连根卸载重建。
 -->
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
@@ -138,7 +139,8 @@ function backToList() {
     <div v-if="errorMessage || mutationError" class="admin-error">
       {{ errorMessage || mutationError }}<button v-if="errorMessage" @click="reload">重试</button>
     </div>
-    <div v-if="loading" class="admin-loading">正在加载知识库详情...</div>
+    <!-- 首屏骨架：仅在「加载中且还没有库数据」时占用内容区，重刷走头部行内提示，不卸载子组件。 -->
+    <div v-if="loading && !library" class="admin-loading">正在加载知识库详情...</div>
     <template v-else-if="library">
       <div class="panel library-detail-head">
         <div class="library-icon">
@@ -148,6 +150,7 @@ function backToList() {
           <div class="library-head-title">
             <h1>{{ library.name }}</h1>
             <t-tag v-if="statusMeta" :theme="statusMeta.theme" variant="light">{{ statusMeta.label }}</t-tag>
+            <span v-if="loading" class="library-head-refreshing">更新中…</span>
           </div>
           <p>
             {{ library.code }} · {{ library.document_count }} 篇文档 · {{ visibilityLabel }} ·
@@ -220,6 +223,10 @@ function backToList() {
   margin: 0;
   color: var(--text);
   font-size: 18px;
+}
+.library-head-refreshing {
+  color: var(--muted);
+  font-size: 12px;
 }
 .library-head-copy p {
   margin: 4px 0 0;

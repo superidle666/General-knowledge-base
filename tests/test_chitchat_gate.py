@@ -296,6 +296,57 @@ def test_node_disabled_lib_gate_is_stricter_than_required(monkeypatch) -> None:
     assert reached["llm"] is True
 
 
+# --------------------------------------------------------------------------
+# 四c、required 空壳库（切了模式但未重导入、词表为空）不得享受宽门禁
+# --------------------------------------------------------------------------
+
+def test_entity_alignment_available_requires_mode_and_non_empty_vocabulary() -> None:
+    available = NodePrepareQuery._entity_alignment_available
+    assert available({"entity_recognition_mode": "required", "entity_vocabulary": [{"name": "HAK-180"}]}) is True
+    assert available({"entity_recognition_mode": "required", "entity_vocabulary": []}) is False
+    assert available({"entity_recognition_mode": "disabled", "entity_vocabulary": [{"name": "HAK-180"}]}) is False
+    # 非法形状一律视为不可用，不能让门禁因脏数据被误放宽
+    assert available({"entity_recognition_mode": "required", "entity_vocabulary": "HAK-180"}) is False
+    assert available({}) is False
+
+
+def test_required_lib_without_vocabulary_uses_strict_gate(monkeypatch) -> None:
+    # 回归现场：后台把库改成 required 但未重导入，Entity 表 0 条 → 对齐整段跳过。
+    # 此时宽门禁得不到任何收益（无抽取调用可省），只多付一次分类延迟与误拦风险，
+    # 故 8~12 字短句退回 disabled 的严门禁。
+    text = "帮我测测这个新功能呀"  # 10 字：宽门禁放行、严门禁拦住
+    reached = {"llm": False}
+
+    def _spy(_text: str):
+        reached["llm"] = True
+        return None, ""
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node = NodePrepareQuery()
+    node._align_entity = lambda state: None
+    node.process(_vocab_state(text, mode="required", vocabulary=[]))
+    assert reached["llm"] is False, "词表为空的 required 库不该走宽门禁"
+
+    # 同一句话、词表非空（对齐真的会跑）时仍走宽门禁：本改动不能把收益场景关掉
+    node.process(_vocab_state(text, mode="required"))
+    assert reached["llm"] is True
+
+
+def test_required_lib_without_vocabulary_still_gates_truly_short_text(monkeypatch) -> None:
+    # 收紧不等于关掉：≤ 8 字的无实体短句在空壳 required 库里仍然会送 L2 判定。
+    reached = {"llm": False}
+
+    def _spy(_text: str):
+        reached["llm"] = True
+        return None, ""
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node = NodePrepareQuery()
+    node._align_entity = lambda state: None
+    node.process(_vocab_state("今天心情怎么样", mode="required", vocabulary=[]))  # 7 字
+    assert reached["llm"] is True
+
+
 def test_node_llm_exception_falls_through_to_retrieval(monkeypatch) -> None:
     # 分类调用报意外异常（真实实现内部已降级，这里测节点调用点的兜底）：放行检索。
     node = NodePrepareQuery()

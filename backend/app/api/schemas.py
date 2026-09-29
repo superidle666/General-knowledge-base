@@ -237,6 +237,26 @@ class LibraryOut(BaseModel):
     deleted_at: datetime | None
 
 
+class LibraryEntityCoverageOut(BaseModel):
+    """本库实体识别的覆盖情况。
+
+    实体识别是**导入期**一次性决定的：kb_entity 记录与切片 item_name 都只在强制识别成功时写入，
+    事后改 entity_recognition_mode **不会追溯已导入文档**。本模型把这个不可见差异量化出来，
+    供管理端在切换模式前给出确认文案、在文档列表标记“待重导入”。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+    library_id: int
+    entity_recognition_mode: str
+    # 口径与查询侧取词表一致：只看未删除且 status=ready 的文档
+    ready_document_count: int
+    entity_document_count: int
+    uncovered_document_count: int
+    # 对齐是否真的可用：required 且全覆盖。false 时检索侧实体过滤/反问/拒答都不会起作用。
+    alignment_effective: bool
+    backfill_needed: bool
+
+
 class MemberCreate(BaseModel):
     """添加知识库成员请求模型。"""
     user_id: int
@@ -295,10 +315,13 @@ class DocumentOut(BaseModel):
 
 
 class DocumentListOut(DocumentOut):
-    """文档列表模型，补充 Chunk 数量和标签名称。"""
+    """文档列表模型，补充 Chunk 数量、标签名称与本档已识别的主实体。"""
     chunk_count: int = 0
     tags: list[str] = Field(default_factory=list)
     library_name: str | None = None
+    # 导入期未跑强制识别（或识别未成功）的文档没有实体记录，返 None；
+    # 管理端据此在 required 库标记“实体未识别（需重新导入）”。
+    entity_name: str | None = None
 
 
 class DocumentDetailOut(DocumentListOut):
@@ -308,6 +331,27 @@ class DocumentDetailOut(DocumentListOut):
 class DocumentUploadOut(DocumentListOut):
     """本地上传成功后的文档元数据。"""
     task_id: int | None = None
+
+
+class DocumentReprocessRequest(BaseModel):
+    """按知识库当前配置重新处理已就绪文档的请求。
+
+    上限 50 份：每份都是一次完整导入（解析 + 向量化），一次放太多个会把队列压成
+    阻塞其他任务的长队，也超过了一次人工确认的实际需要。
+    """
+
+    document_ids: list[int] = Field(min_length=1, max_length=50)
+
+
+class DocumentReprocessOut(BaseModel):
+    """重新处理受理结果：一份文档对应一条新导入任务，旧任务保留作为历史。"""
+
+    document_id: int
+    task_id: int
+    # Redis 入队是否成功。失败时任务仍停在 MySQL 的 queued/queue_pending，
+    # Worker 重启会自己重入队，所以这不是失败，只是“暂时没排上去”。
+    enqueued: bool
+    queue_error: str | None = None
 
 
 class QueryRequest(BaseModel):

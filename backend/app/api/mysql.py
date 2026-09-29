@@ -21,8 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.api.schemas import (
-    ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentTagsUpdate,
-    DocumentUpdate, DocumentUploadOut, LibraryCreate, LibraryOut, LibraryUpdate,
+    ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentReprocessOut, DocumentReprocessRequest,
+    DocumentTagsUpdate,
+    DocumentUpdate, DocumentUploadOut, LibraryCreate, LibraryEntityCoverageOut, LibraryOut, LibraryUpdate,
     ImportTaskOut, ImportTaskEntityConfirm, MemberCreate, MemberOut, OperationLogPageOut, PermissionOut, PermissionUpdate,
     RoleCreate, RoleOut, RoleUpdate, TagCreate, TagOut, TagUpdate, UserCreate,
     UserOut, UserUpdate,
@@ -31,7 +32,7 @@ from backend.app.core.audit import log_operation
 from backend.app.core.auth import AuthenticatedUser, get_current_user, hash_password, require_management_access
 from backend.app.core.permissions import REGISTERED_PERMISSION_CODES, is_registered_permission
 from backend.app.db.models import (
-    Document, DocumentChunk, DocumentTag, ImportTask, Library, LibraryMember, OperationLog,
+    Document, DocumentChunk, DocumentTag, Entity, ImportTask, Library, LibraryMember, OperationLog,
     Permission, Role, SystemSetting, Tag, User,
 )
 from backend.app.db.session import get_db
@@ -244,8 +245,9 @@ def permission_out(permission: Permission) -> dict:
     }
 
 
-def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | None = None, library_name: str | None = None) -> dict:
-    """组装文档管理响应，补充标签和切片数量等列表、详情展示字段。
+def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | None = None, library_name: str | None = None,
+                 entity_name: str | None = None) -> dict:
+    """组装文档管理响应，补充标签、切片数量与本档已识别的主实体。
     """
     return {
         "id": document.id, "library_id": document.library_id, "title": document.title,
@@ -255,7 +257,7 @@ def document_out(document: Document, *, chunk_count: int = 0, tags: list[str] | 
         "parse_error": document.parse_error, "uploaded_by": document.uploaded_by,
         "published_at": document.published_at, "deleted_by": document.deleted_by, "created_at": document.created_at,
         "updated_at": document.updated_at, "chunk_count": chunk_count, "tags": tags or [],
-        "library_name": library_name,
+        "library_name": library_name, "entity_name": entity_name,
     }
 
 
@@ -522,7 +524,8 @@ async def update_library(
     session: AsyncSession = Depends(get_db),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """更新知识库资料和导入规则。修改配置不会自动重新处理已经导入的文档。
+    """更新知识库资料和导入规则。修改配置不会自动重新处理已经导入的文档；
+    实体识别模式的覆盖差值由 GET /libraries/{id}/entity-coverage 查出，供管理端切换前预判。
     """
     if payload.entity_recognition_mode is not None and payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
         raise HTTPException(403, "实体识别模式仅管理员可设置")
@@ -535,6 +538,52 @@ async def update_library(
     await commit(session, "更新知识库失败")
     await session.refresh(library)
     return library
+
+
+async def library_entity_coverage(session: AsyncSession, library: Library) -> dict:
+    """统计本库实体识别覆盖率（两条聚合查询，不随文档数线性增长）。
+
+    口径必须与查询侧取词表一致（backend/app/api/query.py 的 _load_entity_vocabulary）：
+    只看未删除且 status=ready 的文档，否则“已覆盖”会虚高。存在覆盖差时检索侧对齐会因
+    词表不足而不起作用，而这件事在界面上完全看不出来，所以在这里量化出来。
+    """
+    ready_count = (await session.execute(
+        select(func.count(Document.id)).where(
+            Document.library_id == library.id,
+            Document.status == "ready",
+            Document.deleted_at.is_(None),
+        )
+    )).scalar_one()
+    covered_count = (await session.execute(
+        select(func.count(func.distinct(Entity.document_id))).select_from(Entity)
+        .join(Document, Document.id == Entity.document_id).where(
+            Entity.library_id == library.id,
+            Document.status == "ready",
+            Document.deleted_at.is_(None),
+        )
+    )).scalar_one()
+    uncovered = max(0, int(ready_count) - int(covered_count))
+    mode = str(library.entity_recognition_mode or "disabled")
+    return {
+        "library_id": library.id,
+        "entity_recognition_mode": mode,
+        "ready_document_count": int(ready_count),
+        "entity_document_count": int(covered_count),
+        "uncovered_document_count": uncovered,
+        # 与查询侧 _entity_alignment_available 同口径：required 且确实有词表可用。
+        "alignment_effective": mode == "required" and int(ready_count) > 0 and uncovered == 0,
+        "backfill_needed": mode == "required" and uncovered > 0,
+    }
+
+
+@router.get("/libraries/{library_id}/entity-coverage", response_model=LibraryEntityCoverageOut)
+async def get_library_entity_coverage(library_id: int, session: AsyncSession = Depends(get_db)):
+    """查看本库实体识别覆盖情况（就绪文档数/已识别文档数/待重导入数）。
+
+    路径以 /libraries 开头且方法是 GET，沿用已有的 library:read 映射，不引入新权限编码。
+    """
+    library = await get_or_404(session, Library, library_id, "知识库")
+    return await library_entity_coverage(session, library)
 
 
 @router.delete("/libraries/{library_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -613,6 +662,25 @@ async def document_chunk_count(session: AsyncSession, document_id: int) -> int:
     return (await session.execute(select(func.count(DocumentChunk.id)).where(DocumentChunk.document_id == document_id))).scalar_one()
 
 
+async def document_entity_names(session: AsyncSession, document_ids: list[int]) -> dict[int, str]:
+    """批量取文档已识别的主实体名，供列表标记“实体未识别”。
+
+    一次查询建映射，不逐行发 SQL。首期一篇文档只对应一条主实体（kb_entity.document_id 唯一），
+    多行兼容时按名称排序稳定取其一，保证多次请求结果一致。
+    """
+    if not document_ids:
+        return {}
+    result = await session.execute(
+        select(Entity.document_id, Entity.name)
+        .where(Entity.document_id.in_(document_ids))
+        .order_by(Entity.document_id, Entity.name)
+    )
+    mapping: dict[int, str] = {}
+    for document_id, name in result.all():
+        mapping.setdefault(int(document_id), str(name))
+    return mapping
+
+
 @router.get("/documents", response_model=list[DocumentListOut])
 async def list_documents(
     library_id: int | None = Query(None), include_deleted: bool = Query(False),
@@ -626,9 +694,11 @@ async def list_documents(
     if not include_deleted:
         statement = statement.where(Document.deleted_at.is_(None))
     rows = (await session.execute(statement)).all()
+    entity_names = await document_entity_names(session, [item.id for item, _library_name in rows])
     return [
         document_out(item, chunk_count=await document_chunk_count(session, item.id),
-                     tags=await document_tags(session, item.id), library_name=library_name)
+                     tags=await document_tags(session, item.id), library_name=library_name,
+                     entity_name=entity_names.get(item.id))
         for item, library_name in rows
     ]
 
@@ -705,13 +775,7 @@ async def upload_document(
     directory = Path("storage") / "uploads" / str(library_id)
     directory.mkdir(parents=True, exist_ok=True)
     uploaded_documents: list[DocumentUploadOut] = []
-    config_snapshot = {
-        "entity_recognition_mode": library.entity_recognition_mode,
-        "allowed_file_types": library.allowed_file_types or ["pdf", "md"],
-        "max_file_size_mb": library.max_file_size_mb,
-        "max_upload_file_count": library.max_upload_file_count,
-        "chunking_config": library.chunking_config,
-    }
+    config_snapshot = import_config_snapshot(library)
     for filename, file, raw, file_hash in prepared_files:
         # 命名规则：原始文件名在前、uuid 追加在后缀之前（如 手册_a1b2....pdf）。
         # 此前 uuid 前置会让 storage/processed 的解析目录和 MinIO 图片目录以一串
@@ -749,6 +813,138 @@ async def upload_document(
                 failed_queue_task.error_message = f"Redis 入队失败：{error}"[:65535]
             await commit(session, "记录导入队列状态失败")
     return uploaded_documents
+
+
+def import_config_snapshot(library: Library) -> dict:
+    """导入任务的配置快照。
+
+    只用于记录“当时库里配了什么”；worker 实际是按 `library.entity_recognition_mode` 实时读库，
+    不读这份快照，所以快照不能也没有能力把旧配置“锁”在任务上。
+    """
+    return {
+        "entity_recognition_mode": library.entity_recognition_mode,
+        "allowed_file_types": library.allowed_file_types or ["pdf", "md"],
+        "max_file_size_mb": library.max_file_size_mb,
+        "max_upload_file_count": library.max_upload_file_count,
+        "chunking_config": library.chunking_config,
+    }
+
+
+def reprocess_block_reason(document: Document, library: Library, *, is_system_admin: bool,
+                           has_active_task: bool, source_file_exists: bool) -> str | None:
+    """判断这份文档现在能不能按当前配置重新处理；不能则返回可直接展示给用户的理由。
+
+    抽成纯函数是因为这些规则全部在“配置变更”后才可能失效，而端点本身有写库副作用，
+    离线测试只能钉住这种无副作用的判定。
+
+    故意不查文件大小：上限调低后应该还能重跑存量文档，把旧文档永久锁死不是目的；
+    文件类型则必须查，已改得“不再允许 md”的库再写一批 md 进去会和配置直接矛盾。
+    """
+    if document.deleted_at is not None:
+        return f"文档“{document.title}”已删除"
+    if library.deleted_at is not None or library.status != "active":
+        return f"知识库“{library.name}”已删除或停用"
+    if document.status != "ready":
+        return f"文档“{document.title}”当前不是已就绪状态，只有已就绪文档可重新处理"
+    if has_active_task:
+        return f"文档“{document.title}”仍有排队或处理中的导入任务，请先取消或等待完成"
+    if not source_file_exists:
+        return f"文档“{document.title}”的原始文件已不存在，请重新上传"
+    if library.entity_recognition_mode != "disabled" and not is_system_admin:
+        return f"知识库“{library.name}”启用了实体识别，重新处理仅管理员可执行"
+    allowed_extensions = {f".{file_type.lower().lstrip('.')}" for file_type in (library.allowed_file_types or ["pdf", "md"])}
+    extension = Path(document.original_filename).suffix.lower()
+    if extension not in allowed_extensions:
+        return f"文档“{document.title}”的类型 {extension or '未知'} 已不在本库允许范围内"
+    return None
+
+
+@router.post("/documents/reprocess", response_model=list[DocumentReprocessOut], status_code=status.HTTP_202_ACCEPTED)
+async def reprocess_documents(
+    payload: DocumentReprocessRequest,
+    session: AsyncSession = Depends(get_db),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+):
+    """按知识库当前配置重新处理已就绪文档：复用原始文件重跑导入链路。
+
+    实体识别和切片参数都只在导入期生效，改配置不追溯历史文档，这个入口就是那步缺失的补齐动作。
+    重跑不会留下重复数据：`node_persist_chunks` 先删本档切片与实体再同事务写入，
+    `node_import_milvus` 先插新批次再删被取代的旧向量。
+
+    Note:
+        先全部校验再建任务，不接受受理一半；一份文档一条新任务，旧任务保留为历史。
+    """
+    document_ids = list(dict.fromkeys(payload.document_ids))
+    documents = list((await session.execute(select(Document).where(Document.id.in_(document_ids)))).scalars())
+    missing_ids = set(document_ids) - {document.id for document in documents}
+    if missing_ids:
+        raise HTTPException(404, f"文档不存在：{sorted(missing_ids)}")
+    library_ids = {document.library_id for document in documents}
+    libraries = {
+        library.id: library
+        for library in (await session.execute(select(Library).where(Library.id.in_(library_ids)))).scalars()
+    }
+    active_ids = {
+        int(document_id) for document_id in (await session.execute(
+            select(ImportTask.document_id).where(
+                ImportTask.document_id.in_(document_ids),
+                ImportTask.status.in_(("queued", "processing")),
+            )
+        )).scalars()
+    }
+    blocked: list[str] = []
+    for document in documents:
+        library = libraries.get(document.library_id)
+        if library is None:
+            blocked.append(f"文档“{document.title}”的关联知识库不存在")
+            continue
+        reason = reprocess_block_reason(
+            document, library,
+            is_system_admin=current_user.is_system_admin,
+            has_active_task=document.id in active_ids,
+            # storage_key 是相对仓库根的路径，与上传时同一约定；文件不在就不得受理，
+            # 否则任务会在 entry 节点报错，把一份本来正常的 ready 文档刷成 failed。
+            source_file_exists=Path(document.storage_key).is_file(),
+        )
+        if reason:
+            blocked.append(reason)
+    if blocked:
+        # 整体拒绝并只归因前三条：一屏放不下二十条重复原因，修完再提也不会丢后面的问题。
+        raise HTTPException(400, "；".join(blocked[:3]))
+
+    accepted: list[DocumentReprocessOut] = []
+    for document in documents:
+        library = libraries[document.library_id]
+        # 回到 uploaded 才能被 worker 正常推进；副作用是这份文档短暂退出 ready，
+        # 因而短暂不出现在回答来源里，也不参与实体词表——这是重跑必然的代价，界面上要讲清。
+        document.status = "uploaded"
+        task = ImportTask(
+            library_id=document.library_id, document_id=document.id,
+            status="queued", current_step="queued", progress=0,
+            config_snapshot=import_config_snapshot(library), created_by=current_user.id,
+        )
+        session.add(task)
+        await session.flush()
+        await log(session, "reprocess", "document", document.id, {"import_task_id": task.id})
+        await log(session, "queue", "import_task", task.id, {"document_id": document.id, "reason": "reprocess"})
+        accepted.append(DocumentReprocessOut(document_id=document.id, task_id=task.id, enqueued=False))
+    await commit(session, "重新处理受理失败")
+
+    for outcome in accepted:
+        try:
+            outcome.enqueued = bool(await enqueue_import_task(outcome.task_id))
+        except Exception as error:
+            logging.getLogger(__name__).error(
+                "重新处理任务入队失败：task_id=%s error=%s", outcome.task_id, error, exc_info=True,
+            )
+            outcome.queue_error = str(error)[:200]
+            task = await session.get(ImportTask, outcome.task_id)
+            if task is not None:
+                task.current_step = "queue_pending"
+                task.error_message = f"Redis 入队失败：{error}"[:65535]
+            await commit(session, "记录导入队列状态失败")
+    return accepted
+
 
 @router.get("/documents/{document_id}", response_model=DocumentDetailOut)
 async def get_document(document_id: int, session: AsyncSession = Depends(get_db)):

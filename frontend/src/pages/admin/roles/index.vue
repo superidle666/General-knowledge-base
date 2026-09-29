@@ -12,6 +12,7 @@ import { mysqlApi, type Permission, type Role } from '../../../api/mysql'
 import { PAGINATION } from '../../../constants'
 import { useRequest } from '../../../composables'
 import { isSystemAdminRole } from '../shared/formatters'
+import { confirmDialog } from '../../../utils/confirm'
 import { ROLE_STATUS_META, getLifecycleStatusMeta, type StatusMeta } from '../shared/statusMeta'
 import { useAdminCountsStore } from '../../../store/modules/adminCounts'
 
@@ -190,7 +191,13 @@ async function toggleRoleStatus(row: Role) {
 
 async function deleteRole(row: Role) {
   if (isSystemAdminRole(row.code) || deletingRoleId.value) return
-  if (!window.confirm('确定删除该角色吗？')) return
+  const confirmed = await confirmDialog({
+    header: '删除角色',
+    body: `确定删除角色“${row.name}”吗？删除后不再显示在角色列表里，可用行内「恢复」找回。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!confirmed) return
   deletingRoleId.value = row.id
   try {
     await mysqlApi.deleteRole(row.id)

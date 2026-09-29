@@ -3,14 +3,16 @@
  * @Author: 项目维护者
  * @Date: 2026-09-28
  * @Description: 知识库详情页「配置」Tab：当前库规则表单与保存、停用/启用、删除操作。
- * @BusinessRule: 实体识别模式仅 admin 可编辑；存在文档时禁止删除知识库；字段与校验口径见 libraryForm.ts。
+ * @BusinessRule: 实体识别模式仅 admin 可编辑；存在文档时禁止删除知识库；字段与校验口径见 libraryForm.ts；
+ *   实体识别模式变更只在“影响已有文档”时用 confirmDialog 二次确认，文案里的份数来自 entity-coverage 接口。
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
-import { mysqlApi, type Library } from '../../../api/mysql'
+import { mysqlApi, type Library, type LibraryEntityCoverage } from '../../../api/mysql'
 import { USER_ROLE } from '../../../constants'
 import { useUserStore } from '../../../store/modules/user'
+import { confirmDialog } from '../../../utils/confirm'
 import {
   ALL_ENTITY_MODE_OPTIONS,
   FILE_TYPE_OPTIONS,
@@ -20,6 +22,7 @@ import {
   libraryToForm,
   normalizeMaxFileSize,
   validateLibraryForm,
+  type EntityRecognitionMode,
   type LibraryForm,
 } from './libraryForm'
 
@@ -37,6 +40,59 @@ const saving = ref(false)
 const deleting = ref(false)
 const changingStatus = ref(false)
 const mutationError = ref('')
+const entityCoverage = ref<LibraryEntityCoverage | null>(null)
+
+/** 拉取本库实体识别覆盖情况。失败不阻塞配置编辑，只是没了切换前的预判提示。 */
+async function loadEntityCoverage() {
+  try {
+    entityCoverage.value = await mysqlApi.getLibraryEntityCoverage(props.library.id)
+  } catch {
+    entityCoverage.value = null
+  }
+}
+
+// 库 id 就绪（含同路由内切库）即拉一次；immediate 让首次进入配置 Tab 就能拿到数字。
+watch(() => props.library.id, loadEntityCoverage, { immediate: true })
+
+/** 实体识别生效情况：把“改了模式但没重导入”这个界面上看不出来的差异讲出来。 */
+const entityCoverageNote = computed(() => {
+  const coverage = entityCoverage.value
+  if (!coverage || coverage.ready_document_count === 0) return ''
+  if (coverage.entity_recognition_mode === 'required') {
+    if (coverage.uncovered_document_count === 0) {
+      return `强制实体识别已覆盖全部 ${coverage.ready_document_count} 份已就绪文档，检索按实体收窄正常生效。`
+    }
+    return (
+      `当前为强制实体识别，但 ${coverage.uncovered_document_count}/${coverage.ready_document_count} 份已就绪文档` +
+      '没有实体记录：实体过滤、反问与拒答都不会生效，可在文档 Tab 用「重新处理」按当前配置补齐。'
+    )
+  }
+  if (coverage.entity_document_count > 0) {
+    return `当前未启用，但 ${coverage.entity_document_count} 份文档已带实体标注：切换为强制后立即生效，无需重新导入。`
+  }
+  return (
+    `当前未启用，且本库 ${coverage.ready_document_count} 份已就绪文档都没有实体标注：` +
+    '切换为强制后需重新导入才生效。'
+  )
+})
+
+/** 切换实体识别模式的影响文案；无需提示时返空串。 */
+function entityModeChangeWarning(nextMode: EntityRecognitionMode) {
+  const coverage = entityCoverage.value
+  if (!coverage || coverage.ready_document_count === 0) return ''
+  if (nextMode === 'required') {
+    if (coverage.uncovered_document_count === 0) return ''
+    return (
+      `本库有 ${coverage.uncovered_document_count} 份已就绪文档没有实体记录。实体识别只在导入时执行，` +
+      '切换后这些文档不会自动补识别，需在文档 Tab 「重新处理」才生效；在此之前本库的实体过滤、反问与拒答都不会起作用。确定切换吗？'
+    )
+  }
+  const keepNote =
+    coverage.entity_document_count > 0
+      ? `已识别的 ${coverage.entity_document_count} 份文档的实体记录与切片标注会保留，随时可切回。`
+      : ''
+  return `关闭后本库问答不再按实体收窄检索范围，多文档之间的同名参数可能互相串味。${keepNote}确定关闭吗？`
+}
 
 // 壳层刷新库数据后重新回填表单（保存成功/状态切换后保持展示与后端一致）。
 watch(
@@ -63,6 +119,19 @@ async function saveLibrary() {
     mutationError.value = validationError
     return
   }
+  // 实体识别模式不追溯已导入文档，抢在提交前把代价说清楚，避免“改了以为生效了”。
+  if (isSystemAdmin.value && form.value.entityMode !== props.library.entity_recognition_mode) {
+    const warning = entityModeChangeWarning(form.value.entityMode)
+    if (warning) {
+      const confirmed = await confirmDialog({
+        header: '切换实体识别模式',
+        body: warning,
+        confirmText: '仍然保存',
+      })
+      // 取消时不提交也不回滚表单：管理员可以先去文档 Tab 重跑，回来再保存。
+      if (!confirmed) return
+    }
+  }
   saving.value = true
   mutationError.value = ''
   try {
@@ -71,6 +140,8 @@ async function saveLibrary() {
       libraryFormToPayload(form.value, { isAdmin: isSystemAdmin.value, code: props.library.code }),
     )
     await MessagePlugin.success('知识库已保存。')
+    // 模式可能已变，覆盖数据跟着刷新，下一轮提示与确认文案才不会用旧数字。
+    await loadEntityCoverage()
     emit('saved')
   } catch (error) {
     mutationError.value = error instanceof Error ? error.message : '知识库保存失败'
@@ -99,7 +170,13 @@ async function toggleLibraryStatus() {
 
 async function deleteLibrary() {
   if (props.library.document_count > 0) return
-  if (!window.confirm(`确定删除知识库“${props.library.name}”吗？删除后将不再在管理端列表展示。`)) return
+  const confirmed = await confirmDialog({
+    header: '删除知识库',
+    body: `确定删除知识库“${props.library.name}”吗？删除后将不再在管理端列表展示。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!confirmed) return
   deleting.value = true
   mutationError.value = ''
   try {
@@ -134,6 +211,9 @@ async function deleteLibrary() {
           class="library-rule-warning"
           >当前知识库启用了实体识别，暂不支持普通用户导入，请联系管理员修改。</small
         >
+        <small v-else-if="isSystemAdmin && entityCoverageNote" class="library-switch-hint">{{
+          entityCoverageNote
+        }}</small>
       </div>
       <div class="library-field">
         <t-select

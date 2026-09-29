@@ -233,6 +233,9 @@ NOTE: 新增管理接口必须在此处补充映射，否则默认拒绝访问�
             return "document:modify"
         if path.endswith("/upload"):
             return "document:upload"
+        # NOTE: 重新处理不新增文档，只按当前配置重跑本文档的导入，因此归 modify 而不是 upload。
+        if path.endswith("/reprocess"):
+            return "document:modify"
         return {"GET": "document:view", "POST": "document:upload", "PATCH": "document:modify", "DELETE": "document:delete"}[method]
     if path.startswith("/tags"):
         return "document:view" if method == "GET" else "document:modify"

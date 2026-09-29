@@ -1,9 +1,12 @@
 <!-- 文档导入任务：按创建日期查看任务、处理失败重试、取消和清理终态记录。 -->
+<!-- 事件约定：updated 只表示队列指纹变化（包含轮询期间的进度变化），消费方不得直接接整页刷新；
+     需要把任务结果同步到外部列表时，监听弹窗关闭对应的 closed。 -->
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { mysqlApi, type ImportTask } from '../../../api/mysql'
 import { TASK_STATUS } from '../../../constants'
 import { formatDate } from '../../../utils/date'
+import { confirmDialog } from '../../../utils/confirm'
 import { TASK_STATUS_META, getStatusMeta, type StatusMeta } from '../shared/statusMeta'
 
 const props = defineProps<{ visible: boolean }>()
@@ -11,6 +14,7 @@ const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'error', message: string): void
   (event: 'updated'): void
+  (event: 'closed'): void
   (event: 'open-document', documentId: number): void
 }>()
 
@@ -190,8 +194,14 @@ async function submitConfirmEntity() {
 async function confirmNoEntity() {
   const task = confirmTask.value
   if (!task) return
-  if (!window.confirm('确认该文档没有明确主实体？要求实体的知识库无法导入无实体文档，该导入任务将被标记为失败。'))
-    return
+  // 本按钮已经开在一个 t-dialog 内，再确认不能继续套内联弹窗，所以走编程式对话框。
+  const confirmed = await confirmDialog({
+    header: '确认无实体',
+    body: '确认该文档没有明确主实体？要求实体的知识库无法导入无实体文档，该导入任务将被标记为失败。',
+    confirmText: '确认无实体',
+    danger: true,
+  })
+  if (!confirmed) return
   confirmNoEntityBusy.value = true
   try {
     await mysqlApi.confirmImportTaskEntity(task.id, { no_entity: true })
@@ -205,12 +215,15 @@ async function confirmNoEntity() {
 }
 
 async function deleteTask(task: ImportTask) {
-  if (
-    !window.confirm(
-      `确定删除“${task.document_title || `文档 #${task.document_id}`}”的导入任务记录吗？这不会删除原文档和已入库的知识。`,
-    )
-  )
-    return
+  const confirmed = await confirmDialog({
+    header: '删除导入任务记录',
+    body:
+      `确定删除“${task.document_title || `文档 #${task.document_id}`}”的导入任务记录吗？` +
+      '这不会删除原文档和已入库的知识。',
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!confirmed) return
   activeTaskId.value = task.id
   try {
     await mysqlApi.deleteImportTask(task.id)
@@ -234,12 +247,15 @@ function startPolling() {
 
 watch(
   () => props.visible,
-  (visible) => {
+  (visible, previousVisible) => {
     if (visible) {
       void loadTasks()
       startPolling()
     } else {
       stopPolling()
+      // 关闭时上抛一次：队列变化对文档列表和头部计数的影响统一在这一刻补刷新，
+      // 避免父侧把 5 秒轮询的 updated 当作整页重加载的触发源。
+      if (previousVisible) emit('closed')
     }
   },
   { immediate: true },

@@ -75,8 +75,9 @@ class NodePrepareQuery(NodeBase):
         # 闲聊意图闸 v2（disabled/required 都适用）：命中静态话术就预置 answer 并直接返回，
         # 复用查询图既有的“answer 非空 → 跳过检索与生成”短路。
         # 两段式：L1 纯规则零成本先跑；没接住且输入“短且无实体信号”时再让 L2 问一次小模型。
-        # 放在实体对齐之前：required 库命中闲聊连带跳过抽取 LLM 调用，与兜底分类相抵；
-        # disabled 库无调用可省，故用更严的长度门禁控制新增延迟（见 _gate_allows_intent_llm）。
+        # 放在实体对齐之前：命中闲聊连带跳过抽取 LLM 调用，与兜底分类相抵；但“有调用可省”
+        # 只对实体对齐真的会跑的请求成立（required 且词表非空），其余一律用更严的长度门禁
+        # 控制纯新增的分类延迟（见 _gate_allows_intent_llm）。
         if not state.get("answer"):
             if self._chitchat_gate(state):
                 return state
@@ -115,16 +116,30 @@ class NodePrepareQuery(NodeBase):
 
     @staticmethod
     def _gate_allows_intent_llm(state: QueryGraphState, text: str) -> bool:
-        """L2 分级门禁：先过实体护栏，再过本库词表探测；required 库用 12 字宽门禁（命中可省一次抽取
-        调用，净成本≈0）；disabled 库无调用可省，收紧到 8 字，控制纯新增的分类延迟。"""
+        """L2 分级门禁：先过实体护栏，再过本库词表探测；只有**实体对齐真的可用**时才用 12 字
+        宽门禁。宽门禁的理由是“L2 命中可省掉后面那次抽取 LLM 调用，净成本≈0”；词表为空时
+        对齐一进门就早退、无任何调用可省，放宽只会白白多付一次分类延迟并抬高误拦概率
+        （required 空壳库实测现场：后台切了 required 但未重导入，Entity 表 0 条）。
+        """
         if not should_ask_llm(text):
             return False
         if NodePrepareQuery._query_names_known_entity(state, text):
             return False
-        mode = str(state.get("entity_recognition_mode") or "disabled")
-        if mode == "required":
+        if NodePrepareQuery._entity_alignment_available(state):
             return True
         return within_llm_gate_len(text, CHITCHAT_LLM_GATE_DISABLED_LEN)
+
+    @staticmethod
+    def _entity_alignment_available(state: QueryGraphState) -> bool:
+        """本请求是否会真正执行实体对齐：mode 为 required **且**接口注入了非空词表。
+
+        必须与 process() 的对齐入口以及 _align_entity 的“词表为空即早退”保持同一口径，
+        否则闲聊门禁会按一个换不来收益的条件放宽。
+        """
+        if str(state.get("entity_recognition_mode") or "disabled") != "required":
+            return False
+        vocabulary = state.get("entity_vocabulary")
+        return isinstance(vocabulary, list) and bool(vocabulary)
 
     @staticmethod
     def _query_names_known_entity(state: QueryGraphState, text: str) -> bool:

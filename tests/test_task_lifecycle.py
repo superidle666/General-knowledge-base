@@ -21,9 +21,9 @@ def test_both_main_graphs_register_expected_nodes() -> None:
     query_nodes = registered_node_names(QUERY_MAIN_GRAPH)
     assert {"node_entry", "node_persist_chunks", "node_bge_embedding"} <= import_nodes
     assert {"node_prepare_query", "node_rerank", "node_answer_output"} <= query_nodes
-    # 导入 9 个、检索 8 个：数量变化意味着链路结构调整，需要同步复核进度与映射
+    # 导入 9 个、检索 7 个：数量变化意味着链路结构调整，需要同步复核进度与映射
     assert len(import_nodes) == 9, f"导入图节点数变为 {len(import_nodes)}，请同步更新本用例与节点名映射"
-    assert len(query_nodes) == 8, f"检索图节点数变为 {len(query_nodes)}，请同步更新本用例与节点名映射"
+    assert len(query_nodes) == 7, f"检索图节点数变为 {len(query_nodes)}，请同步更新本用例与节点名映射"
 
 
 def test_node_name_mapping_matches_registered_nodes() -> None:

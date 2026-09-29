@@ -37,6 +37,17 @@ export type Library = {
   visibility: 'private' | 'shared'
 }
 
+/** 本库实体识别覆盖情况：识别只在导入期一次定下，换模式不追溯已导入文档。 */
+export type LibraryEntityCoverage = {
+  library_id: number
+  entity_recognition_mode: 'disabled' | 'required'
+  ready_document_count: number
+  entity_document_count: number
+  uncovered_document_count: number
+  alignment_effective: boolean
+  backfill_needed: boolean
+}
+
 export type Document = {
   id: number
   library_id: number
@@ -52,6 +63,17 @@ export type Document = {
   chunk_count?: number
   tags?: string[]
   library_name?: string | null
+  // 导入期识别出的主实体名；无实体记录时为 null（required 库下意味着需重导入）
+  entity_name?: string | null
+}
+
+/** 一次重新处理的受理结果：一份文档对应一条新导入任务，旧任务保留为历史。 */
+export type DocumentReprocessOutcome = {
+  document_id: number
+  task_id: number
+  // false 只是“暂时没排进 Redis 队列”，任务仍停在 MySQL 等 Worker 重启补入队，不是失败。
+  enqueued: boolean
+  queue_error?: string | null
 }
 
 export type ImportTask = {
@@ -267,6 +289,9 @@ export const mysqlApi = {
       method: 'POST',
     })
   },
+  getLibraryEntityCoverage: (id: number) => {
+    return requestApi<LibraryEntityCoverage>(`/api/v1/libraries/${id}/entity-coverage`)
+  },
   listImportTasks: (params = '') => requestApi<ImportTask[]>('/api/v1/import-tasks' + (params ? '?' + params : '')),
   getImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id),
   retryImportTask: (id: number) => requestApi<ImportTask>('/api/v1/import-tasks/' + id + '/retry', { method: 'POST' }),
@@ -282,6 +307,13 @@ export const mysqlApi = {
   listDocuments: (params = '') => {
     const query = params ? `?${params}` : ''
     return requestApi<Document[]>(`/api/v1/documents${query}`)
+  },
+  /** 按知识库当前配置重跑已就绪文档的导入（实体识别与切片参数都只在导入期生效）。 */
+  reprocessDocuments: (documentIds: number[]) => {
+    return requestApi<DocumentReprocessOutcome[]>('/api/v1/documents/reprocess', {
+      method: 'POST',
+      body: JSON.stringify({ document_ids: documentIds }),
+    })
   },
   getDocument: (id: number) => requestApi<Document>(`/api/v1/documents/${id}`),
   createDocument: (payload: Record<string, unknown>) => {

@@ -15,6 +15,7 @@ import { USER_ROLE } from '../../../constants'
 import { useUserStore } from '../../../store/modules/user'
 import { useAdminCountsStore } from '../../../store/modules/adminCounts'
 import { useRequest } from '../../../composables'
+import { confirmDialog } from '../../../utils/confirm'
 import KbCard from './KbCard.vue'
 import {
   ALL_ENTITY_MODE_OPTIONS,
@@ -161,7 +162,13 @@ async function deleteLibrary(library: Library) {
     await MessagePlugin.warning('请先删除该知识库文档后再删除知识库。')
     return
   }
-  if (!window.confirm(`确定删除知识库“${library.name}”吗？删除后将不再在管理端列表展示。`)) return
+  const confirmed = await confirmDialog({
+    header: '删除知识库',
+    body: `确定删除知识库“${library.name}”吗？删除后将不再在管理端列表展示。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!confirmed) return
   mutationError.value = ''
   try {
     await mysqlApi.deleteLibrary(library.id)

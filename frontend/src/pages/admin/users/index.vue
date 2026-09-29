@@ -10,6 +10,7 @@ import { computed, ref, watch } from 'vue'
 import { AddIcon, SearchIcon } from 'tdesign-icons-vue-next'
 import { mysqlApi, type Role } from '../../../api/mysql'
 import { isEmail, isPhone } from '../../../utils/validate'
+import { confirmDialog } from '../../../utils/confirm'
 import { PAGINATION } from '../../../constants'
 import { useRequest } from '../../../composables'
 import { isSystemAdminUser, mapUser, type UserRow } from '../shared/formatters'
@@ -288,7 +289,13 @@ async function toggleUserStatus(row: UserRow) {
 /** 二次确认后软删除用户；系统管理员不可操作。 */
 async function deleteUser(row: UserRow) {
   if (isSystemAdminUser(row) || updatingUserId.value || deletingUserId.value) return
-  if (!window.confirm(`确定删除用户“${row.name}”吗？删除后将不再显示在列表中。`)) return
+  const confirmed = await confirmDialog({
+    header: '删除用户',
+    body: `确定删除用户“${row.name}”吗？删除后将不再显示在列表中。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!confirmed) return
 
   deletingUserId.value = row.id
   try {
