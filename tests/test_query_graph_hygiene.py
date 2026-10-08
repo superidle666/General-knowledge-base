@@ -96,6 +96,27 @@ def test_hyde_returns_the_same_state_object(monkeypatch: pytest.MonkeyPatch) -> 
     assert result["keep_me"] == "原样保留"
 
 
+def test_hyde_drops_entity_filter_once_local_search_relaxed_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R3：主路已经证明"带实体过滤召不回东西"，HyDE 不该再拿同一个过滤条件白跑一次。"""
+    captured: dict[str, object] = {}
+
+    def run(state: dict) -> None:
+        node = NodeSearchEmbeddingHyde()
+        monkeypatch.setattr(node, "_step_1_create_hyde_doc", lambda query: "假设性答案原文")
+        monkeypatch.setattr(
+            node, "_step_2_search_embedding_hyde",
+            lambda **kwargs: captured.update(kwargs) or [{"chunk_id": 7, "content": "切片"}],
+        )
+        node.process(state)
+
+    run({"rewritten_query": "怎么调温", "library_id": 3, "item_names": ["HAK-180"], "entity_filter_relaxed": True})
+    assert captured["item_names"] == []
+    captured.clear()
+    # 反向约束：主路没放宽时 HyDE 必须继续带过滤，否则等于整条链路放弃实体收窄
+    run({"rewritten_query": "怎么调温", "library_id": 3, "item_names": ["HAK-180"]})
+    assert captured["item_names"] == ["HAK-180"]
+
+
 def test_hyde_failure_path_still_returns_state_and_marks_failed(monkeypatch: pytest.MonkeyPatch) -> None:
     """降级分支同样返回完整 state：失败标记在，其他键不能被换成新字典。"""
     node = NodeSearchEmbeddingHyde()

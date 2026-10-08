@@ -14,6 +14,19 @@ from processor.query_processor.chitchat_gate import (
     should_ask_llm,
     within_llm_gate_len,
 )
+from processor.query_processor.inventory_gate import (
+    INVENTORY_REJECT_REPLY,
+    is_library_inventory_question,
+)
+from processor.query_processor.meta_instruction import (
+    CONVERSATION_ECHO_TEMPLATE,
+    INTENT_CONVERSATION_ECHO,
+    INTENT_META_REWRITE,
+    is_conversation_echo,
+    is_regeneration_instruction,
+    latest_answerable_user_text,
+    latest_user_text,
+)
 from processor.query_processor.prompt.entity_extract import (
     ENTITY_EXTRACT_SYSTEM,
     build_entity_extract_prompt,
@@ -64,6 +77,10 @@ class NodePrepareQuery(NodeBase):
         elif not isinstance(library_id, int) or library_id <= 0:
             state["answer"] = "请选择有效的知识库后再进行查询。"
         state["history"] = list(state.get("history") or [])
+        # 两条文本通道仍刻意分开（R2）：检索词需要改写把历史实体补进来（“它/这个”靠它指代消解），
+        # 但实体对齐的拒答判定只能看【本轮原文】——否则上一轮出现过的型号会被当成“用户本轮
+        # 点名了查无此型”，护栏恒真、泛问题被硬拒答（见 _query_names_model_code）。
+        state["query_entity_text"] = query
         state["rewritten_query"] = self._rewrite_query_with_history(query, state["history"])
         state["item_names"] = list(state.get("item_names") or [])
         state["session_id"] = str(state.get("session_id") or "query-session")
@@ -72,6 +89,14 @@ class NodePrepareQuery(NodeBase):
         state["use_web_search"] = bool(state.get("use_web_search", False))
         state["retrieval_top_k"] = int(state.get("retrieval_top_k") or 20)
         state["top_k"] = int(state.get("top_k") or 5)
+        # 元指令与对话回指（R9-B）：这类输入的话题是“这段对话本身”，拿字面串检索必然零召回。
+        # 必须排在闲聊闸**之前**：“继续”“换个说法”短而无实体信号，正好落在闲聊 L2 的门禁里，
+        # 先过闲聊闸会被小模型判成闲聊并预置固定回复，用户要的“再来一版”就永远出不来。
+        # 回指型命中即短路（零检索零生成）；改写型不短路、只换检索词，所以必须早于实体对齐
+        # ——抽取吃 rewritten_query，换词后实体过滤才跟得上（详见 _meta_instruction_gate）。
+        if not state.get("answer"):
+            if self._meta_instruction_gate(state):
+                return self._seal_short_circuit(state)
         # 闲聊意图闸 v2（disabled/required 都适用）：命中静态话术就预置 answer 并直接返回，
         # 复用查询图既有的“answer 非空 → 跳过检索与生成”短路。
         # 两段式：L1 纯规则零成本先跑；没接住且输入“短且无实体信号”时再让 L2 问一次小模型。
@@ -80,12 +105,76 @@ class NodePrepareQuery(NodeBase):
         # 控制纯新增的分类延迟（见 _gate_allows_intent_llm）。
         if not state.get("answer"):
             if self._chitchat_gate(state):
-                return state
+                return self._seal_short_circuit(state)
+        # 库级清单型元问题（R16）："知识库有哪些产品"这类问法内容检索答不了（库里没有"清单"
+        # 这种切片，召回必然落在手册前言/免责声明上），且成本上也不该为它付检索与生成。
+        # 放在实体对齐之前：命中就连带省掉那次抽取 LLM 调用。只在 required 且词表非空的库
+        # 生效，判定只吃【本轮原文】（详见 _inventory_gate）。
+        if not state.get("answer"):
+            if self._inventory_gate(state):
+                return self._seal_short_circuit(state)
         # 实体对齐只在 required 库、且前置校验未直接给出答案时进行；disabled 库整段跳过，保持零回归。
         mode = str(state.get("entity_recognition_mode") or "disabled")
         if mode == "required" and not state.get("answer"):
             self._align_entity(state)
+        return self._seal_short_circuit(state)
+
+    @staticmethod
+    def _seal_short_circuit(state: QueryGraphState) -> QueryGraphState:
+        """静态短路的统一出口：预置了 answer 却没算过来源时补成空列表（J2）。
+
+        拒答/反问/闲聊/校验这几条短路都不进答案节点，`sources` 于是**缺键而不是空列表**；
+        下游用硬下标会 KeyError，用 `.get()` 又分不清"算过但没有来源"和"压根没算"（前端 R15
+        要靠这个区分是否显示"基于 N 个来源"）。本节点有多处提前 return，兜底只能放在唯一出口上。
+
+        未被短路的请求必须原样不带 sources：来源最终由答案节点按"真正进 prompt 的切片"产出
+        （同源口径），这里预置反而会把"还没检索"说成"检索过且没有来源"。
+        """
+        if state.get("answer") and "sources" not in state:
+            state["sources"] = []
         return state
+
+    # ------------------------------------------------------------------
+    # 零·三、元指令与对话回指：回指型回读历史短路，改写型只换检索词（R9-B）
+    # ------------------------------------------------------------------
+
+    def _meta_instruction_gate(self, state: QueryGraphState) -> bool:
+        """命中“对话回指”则预置回读答案并返回 True（短路）；改写型指令只改 state、返回 False。
+
+        - 回指型（`刚刚我问了你什么`）：上一轮的用户原话就是答案，直接回读，零检索零生成零抽取。
+          回读**不做任何跳过**——哪怕上一轮是被 R16 拒答的清单句，“你刚才问了什么”的正确答案仍是它。
+        - 改写型（`换个说法`/`继续`/`用表格列一下`）：用户要的是上一轮那个问题的另一种呈现，
+          于是把检索词换成最近一条“值得再检索一次”的用户问题（跳过清单句与指令句本身），
+          指令原文单独放进 `meta_instruction` 交给生成阶段：它绝不能进检索词（那正是本条要治的
+          污染），丢了又答不出表格/简略。这条**不短路**，仍要检索证据，所以 R5 的无证据守卫
+          照样生效——换个说法也变不出库里没有的内容。
+
+        判定只吃【本轮原文】（与 R2/R16 同口径）：两条骨架都是整句 fullmatch，句子带任何
+        实义内容就不认；历史里没有可回看的问题时一律不改写、不短路（宁查勿否，退回现状）。
+        """
+        text = str(state.get("query_entity_text") or state.get("original_query") or "").strip()
+        if not text:
+            return False
+        history = state.get("history") or []
+        if is_conversation_echo(text):
+            previous = latest_user_text(history)
+            if not previous:
+                return False
+            state["intent"] = INTENT_CONVERSATION_ECHO
+            state["answer"] = CONVERSATION_ECHO_TEMPLATE.format(question=previous[:200])
+            # J2：回读型短路同样要产出空来源列表（而不是缺键）
+            state["sources"] = []
+            logger.info("对话回指已从历史回读（零检索零生成）：%s", text)
+            return True
+        if is_regeneration_instruction(text):
+            previous = latest_answerable_user_text(history)
+            if not previous:
+                return False
+            state["intent"] = INTENT_META_REWRITE
+            state["meta_instruction"] = text
+            state["rewritten_query"] = previous[:500]
+            logger.info("改写型元指令已换用上一轮检索词：%s → %s", text, previous[:80])
+        return False
 
     # ------------------------------------------------------------------
     # 零、闲聊意图闸：L1 规则 → L2 门禁式 LLM 兜底；命中则预置话术短路整条检索链路
@@ -112,6 +201,45 @@ class NodePrepareQuery(NodeBase):
             return False
         state["intent"] = "chitchat"
         state["answer"] = reply
+        return True
+
+    # ------------------------------------------------------------------
+    # 〇·五、库级清单型元问题闸：命中就固定话术短路，不进检索也不进生成（R16）
+    # ------------------------------------------------------------------
+
+    def _inventory_gate(self, state: QueryGraphState) -> bool:
+        """问的是"库本身有哪些产品"而不是"某个产品的内容"时，就地预置拒答话术并返回 True。
+
+        三道反护栏全部取"宁查勿否"：误拒答是用户可见的硬错误，漏拒只是退回现状（继续检索），
+        所以只要本轮原文里出现任何实体线索就放走：
+        ① 任何型号形状（宽松档 `find_shape_mentions`，本库没有也算"用户给了具体对象"）；
+        ② 本库词表里的规范名/别名（纯中文名如"星辰一号"，正则抽不到形状，靠词表命中）；
+        ③ 指代词（"这款有哪些型号"问的是上下文里那个对象，该由改写 + 检索处理）。
+
+        文本通道只吃 `query_entity_text`（本轮原文）：与 R2 给拒答护栏立的规矩同口径，
+        改写串里被历史回填的内容一律不算"用户本轮在要清单"，否则上一轮问过清单问题之后，
+        本轮的普通追问会被连环误拒。
+
+        不启用即零回归：disabled 库、以及 required 但词表为空的空壳库都没有可对齐能力，
+        护栏②失效，启用只会把中文实体名误拒（与 `_entity_alignment_available` 同口径）。
+        """
+        if not self._entity_alignment_available(state):
+            return False
+        text = str(state.get("query_entity_text") or state.get("original_query") or "")
+        if not is_library_inventory_question(text):
+            return False
+        if REFERENCE_PATTERN.search(text):
+            return False
+        if find_shape_mentions(text):
+            return False
+        if self._query_names_known_entity(state, text):
+            return False
+        state["intent"] = "inventory_refusal"
+        state["answer"] = INVENTORY_REJECT_REPLY
+        # J2：短路也要产出"来源"，且必须是空列表——缺键与"算过但没有来源"是两回事，
+        # 前端按后者隐藏徽标，按前者会拿到 undefined。
+        state["sources"] = []
+        logger.info("库级清单型元问题已前置拒答（零检索零生成）：%s", text)
         return True
 
     @staticmethod
@@ -259,15 +387,18 @@ class NodePrepareQuery(NodeBase):
     @staticmethod
     def _query_names_model_code(state: QueryGraphState, mentions: list[str]) -> bool:
         """拒答只针对"当前问题本身点名了一个具体型号代码"：提及既要形如收紧档型号代码
-        （带连字符且含≥2 位数字，如 APL-005），又要确实出现在当前问题文本里。历史或助手
-        答案中出现过的代码不算用户提及，避免上一轮助手罗列过型号时，本轮品牌/泛问题被
-        误判为"点名了查无的型号"。
+        （带连字符且含≥2 位数字，如 APL-005），又要确实出现在**本轮用户原文**里。
+
+        判定对象刻意是 query_entity_text 而不是 rewritten_query（R2）：改写为了指代消解会把
+        历史里的型号拼到检索词头上，拿它当"用户点名了型号"等于把拒答护栏变成恒真命题。
+        老逻辑里历史（包括助手自己列出的型号清单）和改写串都会走进这个判定，
+        用户从没提过的代码足以把一句泛问题回成"未收录该型号"。
 
         这里刻意不用抽取侧那个宽松档：windows10 / wifi6 / G740 这类形状上跟型号无差异的
         版本号一旦被当成"点名型号"，代价是把本可以 best-effort 回答的问题直接拒掉。
         """
         query_norm = NodePrepareQuery._normalize(
-            str(state.get("rewritten_query") or state.get("original_query") or "")
+            str(state.get("query_entity_text") or state.get("original_query") or "")
         )
         return any(
             is_specific_model_code(mention)
@@ -276,11 +407,16 @@ class NodePrepareQuery(NodeBase):
         )
 
     def _extract_mentions(self, state: QueryGraphState) -> list[str]:
-        """正则 + 有界 LLM 双通道抽取实体名，按归一化去重并封顶，保留首个出现的表面形式。"""
+        """正则 + 有界 LLM 双通道抽取实体名，按归一化去重并封顶，保留首个出现的表面形式。
+
+        抽取扫的是 rewritten_query（含历史回填的实体，指代追问靠它才能对齐到本库型号）：
+        改写只从 role == "user" 的历史取值，所以这里不会出现"助手自己列过的型号"。
+        拒答判定不跟着这里走，它只认本轮原文（见 _query_names_model_code）。
+        """
         text = str(state.get("rewritten_query") or state.get("original_query") or "")
         history_text = self._recent_history_text(state.get("history"))
-        # 正则只扫当前问题：历史里（尤其助手自己罗列的型号清单）混有大量型号代码，
-        # 一并扫描会把"上一轮答案引用过的实体"误当成本轮用户提及，污染候选甚至误触发拒答。
+        # 正则只扫当前（含历史回填的）问题串：历史文本本身混有大量型号代码（尤其助手
+        # 自己罗列的清单），一并扇入会把"上一轮答案引用过的实体"误当成本轮用户提及。
         raw_mentions: list[str] = find_shape_mentions(text)
         raw_mentions.extend(self._call_entity_llm(text, history_text))
 
@@ -360,13 +496,30 @@ class NodePrepareQuery(NodeBase):
 
     @staticmethod
     def _normalize(value: object) -> str:
-        """归一化：去所有空白 + casefold。必须与导入侧 node_persist_chunks._normalize_entity_name 同规则，
-        否则查询侧归一化名与词表/存量 normalized_name 对不齐，精确匹配会静默失效。"""
-        return re.sub(r"\s+", "", str(value or "").strip()).casefold()
+        """实体匹配归一化：去空白 + 去标点（含连字符/下划线）+ casefold，直接复用闲聊闸的
+        `normalize_for_match` 口径（R4）。
+
+        为什么必须去连字符：用户照真实写法问 `HAK-180`（旧口径归一化为 `hak-180`），而词表
+        规范名多从文件名派生（`hak180产品安全手册`，天然没有连字符），两侧互不包含 →
+        判"查无此型" → 又恰好是收紧档型号代码 → 库里明明有这份文档却直接拒答。
+        同一句话也不能在闲聊闸的本库词表探测里算"命中实体"、在对齐里算"查无"，
+        所以两个口径必须是同一个函数。
+
+        与导入侧 node_persist_chunks._normalize_entity_name 不再是同一规则，这是有意为之：
+        后者只写进 `Entity.normalized_name`，全仓无读取方（检索词表由 _build_vocab_index 现算），
+        改口径不需要 DB 迁移、也不需要回补存量数据；下一个人请按本说明而不是按"两侧同规则"
+        的旧约束把它改回去。
+        """
+        return normalize_for_match(value)
 
     @staticmethod
     def _rewrite_query_with_history(query: str, history: list[dict]) -> str:
-        """将多轮对话中的最近型号或产品实体补充到当前检索问题。"""
+        """将多轮对话中的最近型号或产品实体补充到当前检索问题。
+
+        只从 role == "user" 的历史取实体（与 _recent_history_text 同口径，R2）：助手回答里
+        动辄罗列一堆型号代码，其中全库唯一的"未收录"代码也能被抽出来拼到检索词头上，
+        再把本轮泛问题拒答掉。用户自己上一轮提过的型号才是合法的指代对象。
+        """
         if not history or not REFERENCE_PATTERN.search(query):
             return query
 
@@ -374,6 +527,7 @@ class NodePrepareQuery(NodeBase):
             str(message.get("text") or "")
             for message in reversed(history)
             if isinstance(message, dict)
+            and str(message.get("role") or "").strip().lower() == "user"
         )
         entities = find_shape_mentions(recent_text)
         if not entities:

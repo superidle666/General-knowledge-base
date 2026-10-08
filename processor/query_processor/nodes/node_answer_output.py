@@ -32,6 +32,22 @@ MAX_HISTORY_CHARS = 3000
 # 推送前稍作停顿，让对话节奏接近真实回答。只加在流式 delta 推送前，非流式接口不拖慢。
 STATIC_REPLY_DELAY_SECONDS = 1.5
 
+# 无证据不进生成（R5）的两套固定话术：刻意区分"跑了一遍但没查到"与"根本没跑成"。
+# 把服务故障说成"库里没有"是在向用户输出一条错误事实（§6-7 "故障 ≠ 零命中"的用户侧）。
+INSUFFICIENT_EVIDENCE_REPLY = (
+    "当前知识库没有找到与这个问题相关的内容，可以换个说法、补充具体型号，或改用其他知识库再问一次。"
+)
+RETRIEVAL_INCOMPLETE_REPLY = "本次检索没有完成，暂时无法依据知识库回答，请稍后重试或换个问法。"
+
+# 检索链路的失败标记：任一为真就说明至少有一路没跑成，不能当成"查过了但没有"。
+# 与 node_search_embedding / node_web_search_mcp / node_rerank 写入 state 的键一一对应。
+RETRIEVAL_FAILURE_MARKERS = (
+    "embedding_search_failed",
+    "hyde_failed",
+    "web_search_failed",
+    "rerank_failed",
+)
+
 class NodeAnswerOutput(NodeBase):
     """
     节点功能: 答案输出
@@ -57,6 +73,11 @@ class NodeAnswerOutput(NodeBase):
                 ]
               }
         """
+        # 阶段零：没有任何可用证据时预置固定话术、不进生成（R5）。
+        # 刻意放在阶段一之前：预置好 answer 就能复用"已有答案即原样输出"的既有出口
+        # （流式推 delta + 静置、非流式写任务结果），不另写一套推送与落库逻辑。
+        self._step_0_guard_without_evidence(state)
+
         # 阶段一：检查answer是否存在,如果存在直接输出answer中的答案
         answer_exists = self._step_1_check_answer(state)
 
@@ -103,6 +124,34 @@ class NodeAnswerOutput(NodeBase):
         logger.info("---node_answer_output 节点处理结束---")
         return state
 
+    def _step_0_guard_without_evidence(self, state: QueryGraphState) -> None:
+        """
+        阶段零：检索没有产出任何可用切片时，预置固定话术并阻断生成（R5）。
+
+        为什么必须挡在生成之前：context 为空时 prompt 里填的是"无参考内容"，模型仍会
+        就着问题本身编出"建议查阅《xxx 手册》"这样的引文；而接口层的兜底条件是
+        `if not sources and not answer` —— 只要模型吐出文字就不触发，于是 sources=0 也能
+        出一份"看着有凭据"的答案。对零召回的模型输出做检查属于不可控优化，在入口断掉才是确定性的。
+
+        "有没有证据"看的是正文而不是列表长度：空切片对模型同样没有信息量。
+        话术二选一只看失败标记：任一为真就不能宣称"库里没有"（§6-7）。
+        """
+        if state.get("answer"):
+            return
+        docs = state.get("reranked_docs") or []
+        if any(isinstance(doc, dict) and str(doc.get("content") or "").strip() for doc in docs):
+            return
+        retrieval_failed = any(bool(state.get(marker)) for marker in RETRIEVAL_FAILURE_MARKERS)
+        state["answer"] = RETRIEVAL_INCOMPLETE_REPLY if retrieval_failed else INSUFFICIENT_EVIDENCE_REPLY
+        # J2：这条短路不进 `_step_2_construct_prompt`，sources 必须显式置空而不是缺键
+        # （缺键与"算过但没有来源"是两回事，前端要靠它区分是否显示"基于 N 个来源"）
+        state["sources"] = []
+        logger.warning(
+            "【答案节点】检索无可用证据，走固定话术不进生成（是否检索故障=%s）问题=%s",
+            retrieval_failed,
+            state.get("original_query", ""),
+        )
+
     def _step_1_check_answer(self, state) -> bool:
           """
           阶段一：检查 state 中是否已有 answer。
@@ -134,6 +183,15 @@ class NodeAnswerOutput(NodeBase):
         # 1. 获取问题和商品名
         # 优先使用重写后的问题
         question = state.get("rewritten_query") or state.get("original_query", "")
+        # 改写型元指令（R9-B）：检索词已换成上一轮的真问题，本轮的“呈现要求”（换个说法/
+        # 用表格/精简点）不能丢。它刻意不进检索词（指令字面串污染召回正是 R9 要治的），
+        # 只在这里补给模型：这是对表述方式的要求，不是新的事实来源。
+        instruction = str(state.get("meta_instruction") or "").strip()
+        if instruction:
+            question = (
+                f"{question}\n（本轮的呈现要求：{instruction}。请据此重新组织表述，"
+                "事实仍以【参考内容】为准）"
+            )
         # 图内跑下来 node_prepare_query 总会先把 item_names 归一成列表；但绕开入口
         # 直接调本节点（脚本、单测）时它可能根本没这个键，硬下标会让“没有实体”
         # 这种正常情况抛 KeyError。

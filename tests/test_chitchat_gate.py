@@ -27,6 +27,7 @@ from processor.query_processor.chitchat_gate import (
     chitchat_reply,
     contains_entity_signal,
     detect_chitchat,
+    is_knowledge_question,
     should_ask_llm,
 )
 from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
@@ -146,6 +147,114 @@ def test_capability_regex_does_not_swallow_knowledge_phrases() -> None:
 
 
 # --------------------------------------------------------------------------
+# 二d、R1：高误拦裸词摘除 + 知识问法骨架护栏（跨领域失配的治本项）
+# --------------------------------------------------------------------------
+
+def test_knowledge_skeleton_questions_are_not_chitchat_by_rules() -> None:
+    """实证现场：这些都在问概念/问文档，旧版被 model_probe 组的裸词"模型"在 L1 直接吃掉。"""
+    for text in (
+        "什么是大语言模型",
+        "什么是llm",
+        "llm是什么",
+        "什么是Agent",
+        "agent和llm的区别",
+        "测试方法是什么",
+        "模型1的固件版本",
+    ):
+        assert detect_chitchat(text, l1_only=True) is None, f"知识问法被 L1 误拦：{text}"
+
+
+def test_knowledge_skeleton_skips_the_l2_classification_call() -> None:
+    """命中骨架就已经确定是业务问题，不该再为它付一次分类调用（最坏 4s）与误判风险。"""
+    for text in ("什么是大语言模型", "什么是llm", "agent和llm的区别", "测试方法是什么", "llm是什么"):
+        assert is_knowledge_question(text) is True, f"未识别为知识问法：{text}"
+        assert should_ask_llm(text) is False, f"仍会去问小模型：{text}"
+
+
+def test_knowledge_skeleton_does_not_swallow_chitchat_templates() -> None:
+    """护栏只认"问概念"的骨架：寒暄/存在/情绪类问法一律不能被它放行到检索链路。"""
+    for text in ("你好", "你是谁", "你是什么模型", "你在哪", "今天心情怎么样", "你能做什么", "谢谢"):
+        assert is_knowledge_question(text) is False, f"闲聊被骨架护栏错放：{text}"
+
+
+def test_model_probe_still_intercepted_after_removing_bare_words() -> None:
+    """摘裸词的边界：真正指向助手自身的打探必须由细粒度正则/竞品名接住，不能靠裸词兜。"""
+    assert detect_chitchat("你是什么模型", l1_only=True) == "model_probe"
+    assert detect_chitchat("你用的是什么模型", l1_only=True) == "model_probe"
+    assert detect_chitchat("你是哪一家的模型", l1_only=True) == "model_probe"
+    assert detect_chitchat("底层跑的是什么", l1_only=True) == "model_probe"
+    assert detect_chitchat("你们是哪家公司开发的", l1_only=True) == "model_probe"
+    assert detect_chitchat("你是gpt几", l1_only=True) == "model_probe"
+    assert detect_chitchat("你是谁", l1_only=True) == "identity"
+
+
+def test_bare_document_vocabulary_words_are_not_registered_probes() -> None:
+    """静态钉住："模型/model/测试"这类文档高频词不得回到子串表（与 L102-103 的注释同一口径）。"""
+    for name, phrases in chitchat_gate_module._MATCH_ORDER:
+        for banned in ("模型", "model", "Model", "测试"):
+            assert banned not in phrases, f"{name} 组又登记了裸词 {banned!r}"
+
+
+# --------------------------------------------------------------------------
+# 二 e、A：identity 模板锁定"你必须是话题主语" + 对话回指句不被闲聊吃
+# 实证现场：用户问“刚刚我问了你什么”被回了整句自我介绍——历史真的在存/在读，
+# 是闲聊闸短路了整条检索+生成链路，压根没走到“用历史生成答案”那一步。
+# --------------------------------------------------------------------------
+
+def test_identity_regex_requires_you_as_the_topic() -> None:
+    """“你”在宾语位置（我问了**你**什么）不是打探身份，不得拦截。"""
+    for text in (
+        "刚刚我问了你什么",
+        "刚才我问了你什么",
+        "我刚刚问了什么",
+        "总结一下我问你的问题",
+        # 只验证锚定本身（无回指词，靠不到骨架护栏）：“你”在宾语位置就不是问助手身份。
+        # 旧正则 `你(是|叫|用)?(谁|什么|哪位|啥)` 无左边界，这句会被直接当自我介绍回。
+        "老板问你什么时候下班",
+    ):
+        assert detect_chitchat(text, l1_only=True) is None, f"回指/宾语句式被 L1 误拦：{text}"
+
+
+def test_identity_still_hits_after_anchoring_the_template() -> None:
+    """锚定的代价不能外溢：真正在问助手身份的变体必须原样接住。"""
+    for text in ("你是谁", "你是谁呀", "你是什么", "你叫什么名字", "你是哪位", "请问你是谁", "你到底是谁"):
+        assert detect_chitchat(text, l1_only=True) == "identity", f"身份打探漏拦：{text}"
+    # 锚定后不得被 identity 抢走：这句归 capability（正则模板顺序比 identity 靠后）
+    assert detect_chitchat("你能做什么", l1_only=True) == "capability"
+    # 子串表继续兜住非句首位置的身份短语（锚定只作用于正则模板）
+    assert detect_chitchat("所以你是干什么的", l1_only=True) == "identity"
+    # 既有行为不变：这句由 capability 正则模板先接住（模板循环跑在子串表之前）
+    assert detect_chitchat("你有什么功能", l1_only=True) == "capability"
+    # 有实际诉求的“你是…”仍不得拦（原有用例的外溢守卫）
+    assert detect_chitchat("你是技术支持吗", l1_only=True) is None
+
+
+def test_conversation_reference_questions_skip_l2_call() -> None:
+    """只修 L1 不够：这类句子≤ 12 字且无实体信号，L2 分类同样可能把它再短路一次。"""
+    for text in ("刚刚我问了你什么", "我之前问的是什么", "刚才的答案再说一遍", "上面我说的问题"):
+        assert is_knowledge_question(text) is True, f"未识别为对话回指问法：{text}"
+        assert should_ask_llm(text) is False, f"仍会去问小模型：{text}"
+
+
+def test_node_answers_history_reference_question_with_generation(monkeypatch) -> None:
+    """端到端：这句话必须走到带历史的生成，而不是被预置话术吃掉。"""
+    node = NodePrepareQuery()
+    calls: dict[str, object] = {"llm": False, "align": False}
+
+    def _spy(_text: str):
+        calls["llm"] = True
+        return "identity", "不该被调用"
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node._align_entity = lambda state: calls.__setitem__("align", True)
+    state = node.process(_state("刚刚我问了你什么"))
+    assert state.get("intent") is None
+    assert not state.get("answer")
+    assert calls["llm"] is False, "对话回指问法不该问小模型"
+    assert calls["align"] is True
+
+
+# --------------------------------------------------------------------------
 # 二c、L2 门禁与返回解析（纯函数，不触发调用）
 # --------------------------------------------------------------------------
 
@@ -216,6 +325,25 @@ def test_node_gates_bare_ni_shi_without_llm_in_required_lib() -> None:
     assert state["intent"] == "chitchat"
     assert state["answer"] in CHITCHAT_REPLIES["identity"]
     assert called["align"] is False
+
+
+def test_node_does_not_intercept_or_call_llm_for_concept_question(monkeypatch) -> None:
+    # 回归现场（真实对话日志）："什么是大语言模型"被闲聊闸判成"打探底层模型"，
+    # 完全没进检索链路。现在既不短路、也不付 L2 分类调用，直接进实体对齐与检索。
+    node = NodePrepareQuery()
+    calls: dict[str, object] = {"llm": False, "align": False}
+
+    def _spy(_text: str):
+        calls["llm"] = True
+        return "model_probe", "不该被调用"
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node._align_entity = lambda state: calls.__setitem__("align", True)
+    state = node.process(_state("什么是大语言模型"))
+    assert state.get("intent") is None
+    assert not state.get("answer")
+    assert calls["llm"] is False, "命中知识问法骨架就不该问小模型"
+    assert calls["align"] is True
 
 
 def test_node_l1_hit_never_reaches_llm_gate() -> None:

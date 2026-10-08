@@ -1,9 +1,9 @@
 """检索侧实体抽取提示词。
 
-@FilePath: processor/query_processor/prompt/entity_extract.py
-@Description: 让模型从用户问题及多轮历史里抽取"被询问的产品/型号实体"，输出稳定 JSON。
-@BusinessRule: 只做实体抽取、不回答问题；无法确定时返回空数组，交由正则与词表对齐兜底，
-               宁可漏抽也不能臆造词表里没有的型号，否则会错误触发检索过滤或拒答。
+processor/query_processor/prompt/entity_extract.py
+让模型从用户问题及多轮历史里抽取"被询问的产品/型号实体"，输出稳定 JSON。
+只做实体抽取、不回答问题；无法确定时返回空数组，交由正则与词表对齐兜底，
+宁可漏抽也不能臆造词表里没有的型号，否则会错误触发检索过滤或拒答。
 """
 
 ENTITY_EXTRACT_SYSTEM = (

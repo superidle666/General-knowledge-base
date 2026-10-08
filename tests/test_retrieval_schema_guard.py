@@ -248,9 +248,44 @@ def _call_names_inside_try(path: Path, function_name: str) -> set[str]:
     raise AssertionError(f"{path.name} 中找不到 {function_name}，请同步更新用例")
 
 
+def _unprotected_call_names(path: Path) -> set[str]:
+    """收集“没有被任何 try 正文包住”的被调用名（含 self.method 的方法名）。
+
+    except 块里的调用算裸调用：那里已经是降级分支，再抛出去就没人接了。
+    """
+    names: set[str] = set()
+
+    def collect(node: ast.AST, protected: bool) -> None:
+        if isinstance(node, ast.Try):
+            for child in node.body:
+                collect(child, True)
+            for handler in node.handlers:
+                collect(handler, False)
+            for child in (*node.orelse, *node.finalbody):
+                collect(child, protected)
+            return
+        if isinstance(node, ast.Call) and not protected:
+            if isinstance(node.func, ast.Name):
+                names.add(node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                names.add(node.func.attr)
+        for child in ast.iter_child_nodes(node):
+            collect(child, protected)
+
+    collect(ast.parse(path.read_text(encoding="utf-8")), False)
+    return names
+
+
 def test_local_node_validates_schema_inside_the_failure_handler() -> None:
-    """挪出 try 就等于把降级改成 500，这里用 AST 锁住调用位置。"""
-    assert "resolve_output_fields" in _call_names_inside_try(LOCAL_NODE, "process")
+    """挪出 try 就等于把降级改成 500，这里用 AST 锁住调用位置。
+
+    R3 之后本地节点把“一次检索”抽成了 `_search_once`（带过滤与放宽重查要复用同一段），
+    校验点跟着搬过去：本守卫锁的从来不是“必须写在 process 体内”，而是
+    “schema 硬校验只能出现在被 try 包住的调用位置上”。
+    """
+    assert "resolve_output_fields" in _call_names_inside_try(LOCAL_NODE, "_search_once")
+    # 全文件不得出现裸调用：哪怕只多一处，那一路检索故障就不再是降级而是 500
+    assert "resolve_output_fields" not in _unprotected_call_names(LOCAL_NODE)
 
 
 def test_hyde_search_step_runs_inside_the_failure_handler() -> None:

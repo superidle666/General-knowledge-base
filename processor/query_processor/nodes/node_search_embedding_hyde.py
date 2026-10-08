@@ -44,7 +44,8 @@ class NodeSearchEmbeddingHyde(NodeBase):
         2. 生成假设文档 (Step 1)：调用LLM，基于用户问题生成一段假设性的理想回答（即HyDE文档）。
         3. 混合检索 (Step 2)：
            - 将“用户问题 + 假设文档”合并，生成BGE-M3稠密+稀疏向量。
-           - 在与本地检索同一个集合上执行混合检索（带知识库隔离与实体过滤）。
+           - 在与本地检索同一个集合上执行混合检索（带知识库隔离与实体过滤；主路已放宽
+             实体过滤时本路同样不带过滤，见 entity_filter_relaxed）。
         4. 结果封装：把归一化后的切片列表、假设文档原文与本路是否失败的标记写回 state。
 
         失败一律降级为空召回并置 hyde_failed，不能让整个问答请求因增强链路失败而失败：
@@ -61,7 +62,9 @@ class NodeSearchEmbeddingHyde(NodeBase):
         # 1、用户问题、目标知识库和已确认实体名
         rewritten_query = str(state.get("rewritten_query") or state.get("original_query") or "").strip()
         library_id = state.get("library_id")
-        item_names = state.get("item_names") or []
+        # R3：本地主路已经证明“带实体过滤召不回切片”并放宽重查过，本路不要再拿同一个
+        # 过滤条件白跑一次（两路结果要在 RRF 里合并，一路被过滤卡空等于凭空少一路）。
+        item_names = [] if state.get("entity_filter_relaxed") else (state.get("item_names") or [])
 
         if not rewritten_query:
             logger.info("步骤1: 无有效问题，跳过 HyDE 检索")

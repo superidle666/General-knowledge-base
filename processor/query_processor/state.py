@@ -2,9 +2,8 @@
 """
 问答工作流状态定义。
 
-@FilePath: processor/query_processor/state.py
-@Date: 2026-09-07
-@Description: 统一声明导入问答节点之间传递的查询、检索、答案和图片字段。
+processor/query_processor/state.py
+统一声明导入问答节点之间传递的查询、检索、答案和图片字段。
 """
 
 from typing import TypedDict, List
@@ -36,6 +35,7 @@ class QueryGraphState(TypedDict, total=False):
     reranked_docs: list  # 重排序后的最终 Top-K 文档
     rerank_failed: bool  # 重排序服务是否失败并回退到原始召回
     embedding_search_failed: bool  # 本地主路检索是否故障（故障≠零命中：Milvus 异常时该路置空并留痕，不伪装成“没查到”）
+    entity_filter_relaxed: bool  # 带实体过滤零召回后是否已放宽为“只带库隔离条件”重查过一次（放宽是兜底，既非故障也非零命中；下游增强检索与日志据此区分）
     hyde_failed: bool  # HyDE 链路是否失败（失败时该路召回为空，不阻断主链路）
     web_search_failed: bool  # 联网检索是否失败（失败时仅用本地结果继续回答）
     sources: list  # 面向用户端的来源列表
@@ -47,8 +47,10 @@ class QueryGraphState(TypedDict, total=False):
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
-    intent: str  # 意图标签：chitchat=命中闲聊意图闸（跳过检索、走静态话术）；其余为正常知识问答
-    rewritten_query: str  # 改写后的问题
+    intent: str  # 意图标签：chitchat=命中闲聊意图闸；inventory_refusal=库级清单型元问题被前置拒答（两者都跳过检索与生成走固定话术）；conversation_echo=对话回指，同样短路但答案由历史回读而非固定话术；meta_rewrite=改写型元指令（不短路：只把检索词换成上一轮真问题，照常检索与生成）；其余为正常知识问答
+    rewritten_query: str  # 改写后的问题（专供检索：会按历史补入实体，解决“它/这个”一类指代）
+    query_entity_text: str  # 本轮用户原文（未经改写）：实体对齐的拒答判定只看它，改写串里回填的型号不算“用户点名了型号”
+    meta_instruction: str  # 本轮是改写型元指令（“换个说法/用表格列一下”）时的指令原文：不进检索词，只作为呈现要求进生成 prompt
     history: list  # 历史对话记录
     is_stream: bool  # 是否流式输出
     persist_history: bool  # 是否由工作流写入 Mongo 历史（新 API 由接口统一保存）

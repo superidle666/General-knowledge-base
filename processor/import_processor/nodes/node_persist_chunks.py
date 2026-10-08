@@ -218,7 +218,12 @@ class NodePersistChunks(BaseNode):
 
     @staticmethod
     def _normalize_entity_name(name: str) -> str:
-        """生成用于精确对齐的归一化实体名：去首尾空白、casefold、剔除内部空白。"""
+        """生成用于精确对齐的归一化实体名：去首尾空白、casefold、剔除内部空白。
+
+        注意与检索侧不同口径：`NodePrepareQuery._normalize` 额外去连字符/下划线/标点
+        （否则 `HAK-180` 对不上从文件名派生的 `hak180产品安全手册`）。本列当前无读取方，
+        检索词表由接口取 `name`+`aliases` 现算，因此两边不必（也刻意）保持一致。
+        """
         return re.sub(r"\s+", "", name.strip()).casefold()
 
     @classmethod

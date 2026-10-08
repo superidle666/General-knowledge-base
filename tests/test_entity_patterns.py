@@ -236,8 +236,14 @@ def test_old_local_constants_are_gone() -> None:
 
 
 def test_shape_extraction_is_reused_instead_of_duplicated() -> None:
-    """两处"扫形状抽实体"的循环收敛成一个公共调用；调用点数变了说明有人在别处又写了一遍。"""
-    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 2
+    """所有“扫形状抽实体”的地方都只能调同一个公共函数；调用点数变了就得逐个核实。
+
+    现行三处：① `_extract_mentions` 的正则通道；② `_rewrite_query_with_history` 从历史借型号；
+    ③ `_inventory_gate` 的反护栏（R16：本轮提到了任何实体形状就不当清单问题拒）。
+    坚持等于而不是“至少”：新增调用点必须说明它复用的是同一口径，而不是在别处又写了一套正则
+    （自写一套正则由上一条“文件不得自带型号正则”的守卫兜住）。
+    """
+    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 3
 
 
 # --------------------------------------------------------------------------

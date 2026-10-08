@@ -13,6 +13,7 @@ from __future__ import annotations
 import pytest
 from graph_introspection import PROJECT_ROOT, typed_dict_keys
 
+from processor.query_processor.chitchat_gate import normalize_for_match
 from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
@@ -40,11 +41,21 @@ def node(monkeypatch):
 # 一、归一化与词表索引
 # --------------------------------------------------------------------------
 
-def test_normalize_strips_all_whitespace_and_casefolds() -> None:
-    # 必须与导入侧 node_persist_chunks._normalize_entity_name 同规则，否则两侧对不齐
+def test_normalize_strips_whitespace_punctuation_and_casefolds() -> None:
+    """R4：检索侧归一化统一走闲聊闸的 `normalize_for_match` 口径（去空白 + 去标点 + casefold）。
+
+    旧口径保留连字符，用户照真实型号写法问 `HAK-180`（归一化 `hak-180`）而词表键是从
+    文件名派生的 `hak180产品安全手册`（天然没有连字符），两侧互不包含 → 判“查无”→
+    又恰好是收紧档型号代码 → 库里明明有这份文档却被误拒答。
+    """
     assert NodePrepareQuery._normalize("HUAWEI MateBook D 14") == "huaweimatebookd14"
     assert NodePrepareQuery._normalize("  烫金机\nPro ") == "烫金机pro"
+    assert NodePrepareQuery._normalize("HAK-180") == "hak180"  # 连字符不再构成差异
+    assert NodePrepareQuery._normalize("HAK_180") == "hak180"  # 下划线同上
     assert NodePrepareQuery._normalize(None) == ""
+    # 与闲聊闸同一口径：同一句话不能在本库词表探测里算“命中实体”、在对齐里算“查无此型”
+    for value in ("HAK-180", "一加 Ace 6T", "hak180产品安全手册", "XT-1"):
+        assert NodePrepareQuery._normalize(value) == normalize_for_match(value)
 
 
 def test_build_vocab_index_merges_duplicate_canonical_and_normalizes_aliases() -> None:
@@ -56,7 +67,9 @@ def test_build_vocab_index_merges_duplicate_canonical_and_normalizes_aliases() -
     index = NodePrepareQuery._build_vocab_index(vocabulary)
     assert [canonical for canonical, _ in index] == ["HAK-180"]
     keys = dict(index)["HAK-180"]
-    assert keys == {"hak-180", "烫金机", "hak180"}
+    # R4 统一口径后“HAK-180”与别名“HAK180”归一化成同一个键（去连字符）；
+    # 但回填给 Milvus 的规范名仍是原样串（item_name 存的就是它），只有匹配键被归一化。
+    assert keys == {"hak180", "烫金机"}
 
 
 def test_build_vocab_index_tolerates_bad_shapes() -> None:
@@ -148,10 +161,77 @@ def test_brand_followup_after_assistant_model_list_is_not_refused(node) -> None:
     assert not result.get("answer")
 
 
+def test_refusal_guard_uses_current_turn_text_not_the_rewritten_query(node) -> None:
+    """R2：拒答判定只看【本轮用户原文】，改写串里回填的型号不能反过来当成"用户点名了查无的型号"。
+
+    上一轮用户自己问过 HAK-999（本库确实没收录），本轮指代追问"它怎么修"：改写把 HAK-999
+    补进检索词是对的（否则这一轮无从过滤），但旧逻辑的拒答护栏判定的正是这个改写串，
+    于是护栏恒为真 → 回一句"未收录该型号"，用户本轮根本没提任何型号。
+    """
+    node._call_entity_llm = lambda text, history_text: []
+    state = _required_state("它怎么修", [{"name": "HAK-180", "aliases": []}])
+    state["history"] = [{"role": "user", "text": "HAK-999 开不了机"}]
+    result = node.process(state)
+    assert not result.get("answer")  # 退回不带过滤检索，而不是硬拒答
+    assert result["item_names"] == []
+    assert "HAK-999" in result["rewritten_query"]  # 检索词仍带着历史实体（改写本身没被削弱）
+    assert result["query_entity_text"] == "它怎么修"  # 两条通道在状态里分开
+
+
+def test_rewrite_only_borrows_entities_from_user_history() -> None:
+    """R2：指代改写只从 role == "user" 的历史取实体，助手答案里的型号清单一律不借。
+
+    助手回答动辄罗列十几个型号代码，全库唯一的"未收录"代码都可能出现在里面；
+    把它们补进本轮检索词，等于让助手上一句说了什么决定本轮能不能查无此型号。
+    """
+    history = [
+        {"role": "user", "text": "都有哪些报错"},
+        {"role": "assistant", "text": "常见报错代码有 E-12、F-03、P-21 等"},
+    ]
+    assert NodePrepareQuery._rewrite_query_with_history("这个报错怎么处理", history) == "这个报错怎么处理"
+    # 用户本轮是泛问题、上一轮用户也没点型号：抽取通道与拒答通道都拿不到任何具体代码
+    result_state = {"original_query": "这个报错怎么处理", "query_entity_text": "这个报错怎么处理"}
+    assert NodePrepareQuery._query_names_model_code(result_state, ["E-12", "F-03"]) is False
+
+
+def test_rewrite_still_borrows_model_user_asked_last_turn() -> None:
+    """R2 的反向约束：收紧 role 之后，真正的指代消解照常工作（用户上一轮自己提的型号仍会回填）。"""
+    history = [
+        {"role": "assistant", "text": "长按电源键三秒"},
+        {"role": "user", "text": "HAK-180 怎么开机"},
+    ]
+    rewritten = NodePrepareQuery._rewrite_query_with_history("它的固件版本是多少", history)
+    assert rewritten.startswith("HAK-180")
+
+
+def test_coreference_followup_still_filters_by_borrowed_model(node) -> None:
+    # 端到端钉住上一条静态约束在图里的效果：追问句本身没有型号，靠历史回填命中词表并带过滤检索
+    node._call_entity_llm = lambda text, history_text: []
+    state = _required_state("它的固件版本是多少", [{"name": "HAK-180", "aliases": []}])
+    state["history"] = [
+        {"role": "user", "text": "HAK-180 怎么开机"},
+        {"role": "assistant", "text": "长按电源键三秒，E-12、F-03 都可能是报错"},
+    ]
+    result = node.process(state)
+    assert result["item_names"] == ["HAK-180"]
+    assert not result.get("answer")
+
+
 def test_required_unknown_model_is_refused(node) -> None:
     state = node.process(_required_state("HAK-999 无法启动", [{"name": "HAK-180", "aliases": []}]))
     assert state["item_names"] == []
     assert "未收录" in (state.get("answer") or "")
+
+
+def test_hyphenated_model_code_matches_hyphen_free_vocabulary_name(node) -> None:
+    """R4：用户照真实写法问 `HAK-180`，词表规范名是从文件名派生的 `hak180产品安全手册`（天然没有连字符）。
+
+    两侧归一化口径不一致时互不包含 → candidates 空 → 又恰好是收紧档型号代码 → 库里明明
+    有这份文档却回一句"未收录与该型号相关的产品文档"。这是比 R2 更容易被真实用户踩到的误拒答。
+    """
+    state = node.process(_required_state("HAK-180 报错怎么处理", [{"name": "hak180产品安全手册", "aliases": []}]))
+    assert not state.get("answer")
+    assert state["item_names"] == ["hak180产品安全手册"]  # 回填规范名原样串，供 Milvus 字面命中
 
 
 def test_required_without_any_mention_falls_back_to_unfiltered(node) -> None:
@@ -230,6 +310,13 @@ def test_query_api_injects_entity_mode_at_both_entrypoints() -> None:
 
 
 def test_entity_alignment_state_channels_are_declared() -> None:
-    """LangGraph 会静默丢弃未声明的状态键——模式与词表通道必须显式声明。"""
+    """LangGraph 会静默丢弃未声明的状态键——模式与词表通道必须显式声明。
+
+    R2 的 `query_entity_text`（拒答判定的原文通道）与 R3 的 `entity_filter_relaxed`
+    （过滤放宽标记）丢了键都不会报错，只会让护栏退化成旧行为、让放宽在日志里消失。
+    """
     declared = typed_dict_keys(QUERY_STATE, "QueryGraphState")
-    assert {"entity_recognition_mode", "entity_vocabulary", "item_names", "answer"} <= declared
+    assert {
+        "entity_recognition_mode", "entity_vocabulary", "item_names", "answer",
+        "query_entity_text", "entity_filter_relaxed",
+    } <= declared
