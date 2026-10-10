@@ -232,7 +232,10 @@ def test_multiple_candidates_clarify(monkeypatch) -> None:
 def test_named_unknown_model_code_refuses(monkeypatch) -> None:
     state = _align(["APL-999"], IPHONE_LIBRARY, "APL-999 多少钱", monkeypatch)
     assert state[EXIT_KEY] == "refuse"
-    assert state["answer"] == REFUSE_TEMPLATE
+    # 拒答句从等值改为 startswith：本阶段它在后面追加了本库实有清单的前 3 项（报错型号的用户
+    # 看见名单就知道该改报哪个）。追加的是措辞，不是判定——“该不该拒答”仍由收紧档型号代码那条决定。
+    assert state["answer"].startswith(REFUSE_TEMPLATE)
+    assert "本库收录了：iPhone 15、iPhone 15 Pro、iPhone 18 Pro。" in state["answer"]
     assert state[SIGNALS_KEY]["model_code_named"] is True
 
 
@@ -310,7 +313,7 @@ def offline_prepare(monkeypatch: pytest.MonkeyPatch):
     """把 process() 里所有可能发外部调用或参与判定的步骤短路掉，只留编排与打标。"""
     monkeypatch.setattr(NodePrepareQuery, "_rewrite_query_with_history", staticmethod(lambda q, h: q))
     monkeypatch.setattr(NodePrepareQuery, "_backfill_ellipsis_anchor", staticmethod(lambda t, s: t))
-    for gate in ("_meta_instruction_gate", "_chitchat_gate", "_inventory_gate"):
+    for gate in ("_meta_instruction_gate", "_chitchat_gate", "_metadata_gate"):
         monkeypatch.setattr(NodePrepareQuery, gate, lambda self, state: False)
 
 
@@ -334,7 +337,7 @@ def test_disabled_library_marks_not_required(offline_prepare) -> None:
     [
         ("_meta_instruction_gate", "meta_instruction"),
         ("_chitchat_gate", "chitchat"),
-        ("_inventory_gate", "inventory"),
+        ("_metadata_gate", "metadata"),
     ],
 )
 def test_pre_gates_mark_pre_gated_not_bare_search(

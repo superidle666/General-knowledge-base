@@ -24,10 +24,17 @@ from backend.app.api.schemas import (
     QuerySessionUpdate,
     QuerySourceOut,
 )
+from backend.app.api.library_facts import (
+    READY_DOCUMENT_CLAUSES,
+    empty_library_facts,
+    load_library_facts,
+)
 from backend.app.core.auth import AuthenticatedUser, get_current_user, get_optional_current_user
 from backend.app.db.models import Document, DocumentChunk, Entity, Library
 from backend.app.db.session import get_db
 from processor.query_processor.main_graph import get_kb_query_workflow
+from processor.query_processor.metadata_gate import is_metadata_question
+from tool.logger import logger
 from utils.sse_utils import SSEEvent, create_sse_queue, get_sse_queue, push_to_session, remove_sse_queue
 from utils.mongo_history_utils import (
     ensure_user_session,
@@ -95,6 +102,9 @@ async def _load_entity_vocabulary(session: AsyncSession, library_id: int, librar
     """required 库载入本库实体词表供查询侧对齐；只取就绪且未删除文档，与可召回切片保持一致。
 
     词表由异步接口注入 state，而不是在同步检索图里读库：查询图跑在线程池且 MySQL 只有异步会话。
+
+    口径常量 `READY_DOCUMENT_CLAUSES` 与元数据画像共用一份：当年它就是四处各抄了一遍，
+    改一处忘三处的表现不是报错而是"清单里混进了待确认和已删除的文档"。
     """
     if str(library.entity_recognition_mode or "disabled") != "required":
         return []
@@ -104,12 +114,36 @@ async def _load_entity_vocabulary(session: AsyncSession, library_id: int, librar
             .join(Document, Document.id == Entity.document_id)
             .where(
                 Entity.library_id == library_id,
-                Document.status == "ready",
-                Document.deleted_at.is_(None),
+                *READY_DOCUMENT_CLAUSES,
             )
         )
     ).all()
     return _entity_vocab_payload([(row[0], row[1]) for row in rows])
+
+
+async def _load_library_facts_if_needed(
+    session: AsyncSession, library_id: int, library: Library, query: str
+) -> dict:
+    """只在"本库会启用元数据闸 且 句式像库级元问题"时读画像，其余一律空壳。
+
+    两个前提缺一不可：
+    - 模式不是 required → 图里的闸整段不生效（与 `_entity_alignment_available` 同口径），
+      画像装了也没人读，还要为每次普通问答多付五次聚合查询；
+    - 句式不像元问题 → 同样用不上。探测函数与图内判定是**同一个** `is_metadata_question`：
+      两处各写一套判据会出现"接口没装载、图里却判成元问题"，那正好落进降级话术，
+      用户看见的是一句本可以不出现的错误。
+
+    读库失败不抛 503：内容检索照常跑，只把 `loaded=False` 带下去由元数据闸出降级句。
+    """
+    if str(library.entity_recognition_mode or "disabled") != "required":
+        return empty_library_facts(library_id, library)
+    if not is_metadata_question(query):
+        return empty_library_facts(library_id, library)
+    try:
+        return await load_library_facts(session, library_id, library)
+    except Exception as error:  # noqa: BLE001 - 画像读挂不能拖垮问答，降级成 loaded=False 继续
+        logger.warning("库元数据画像装载失败，已降级（library_id=%s）：%s", library_id, error)
+        return empty_library_facts(library_id, library)
 
 
 def _web_source_out(source: dict) -> QuerySourceOut:
@@ -202,8 +236,9 @@ async def _hydrate_sources(
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(
             Document.library_id == library_id,
-            Document.status == "ready",
-            Document.deleted_at.is_(None),
+            # 来源可溯源的文档口径与词表/元数据画像同一条：已删或未就绪的文档不能出现在面板里，
+            # 也不能因为口径写得不一样而在三个地方各自漂移。
+            *READY_DOCUMENT_CLAUSES,
             DocumentChunk.vector_id.in_(check_ids),
         )
     )
@@ -421,6 +456,7 @@ async def query_knowledge_base(
     library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
     entity_vocabulary = await _load_entity_vocabulary(session, payload.library_id, library)
+    library_facts = await _load_library_facts_if_needed(session, payload.library_id, library, payload.query)
     try:
         # 图是进程内共享的（节点无请求态），每请求只新建 state 字典
         workflow = get_kb_query_workflow()
@@ -440,6 +476,9 @@ async def query_knowledge_base(
             # 库级确认闸严格程度：required 库据此走“先问一句”还是“只筛选不反问”
             "entity_confirm_mode": str(library.entity_confirm_mode or "strict"),
             "entity_vocabulary": entity_vocabulary,
+            # 库元数据画像：同步与流式两个入口必须成对注入，漏一个就是"同一个问题在两个入口
+            # 一个答得出一个答不出"，比都不支持更难查（守卫见 tests/test_query_entity_alignment.py）
+            "library_facts": library_facts,
             "is_stream": False,
             "persist_history": False,
         })
@@ -478,6 +517,7 @@ async def stream_query_knowledge_base(
     library = await _get_active_library(session, payload.library_id)
     session_id, history = await _prepare_session_context(payload, user)
     entity_vocabulary = await _load_entity_vocabulary(session, payload.library_id, library)
+    library_facts = await _load_library_facts_if_needed(session, payload.library_id, library, payload.query)
     stream_id = f"query-stream-{uuid.uuid4().hex}"
     create_sse_queue(stream_id)
 
@@ -494,6 +534,7 @@ async def stream_query_knowledge_base(
                 "entity_recognition_mode": str(library.entity_recognition_mode or "disabled"),
                 "entity_confirm_mode": str(library.entity_confirm_mode or "strict"),
                 "entity_vocabulary": entity_vocabulary,
+                "library_facts": library_facts,
                 "is_stream": True,
                 "persist_history": False,
             })

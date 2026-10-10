@@ -91,11 +91,16 @@ def _non_appearance_term(alt: str, question: str) -> str:
 
 # 检索链路的失败标记：任一为真就说明至少有一路没跑成，不能当成"查过了但没有"。
 # 与 node_search_embedding / node_web_search_mcp / node_rerank 写入 state 的键一一对应。
+# `metadata_query_failed` 不是检索链路的故障而是元数据画像读挂：元数据短路自带答案、
+# 根本进不到本节点，登记它是为了另一个调用点（接口层日志与静态守卫），而且必须登记：
+# 三个语义槽（库里没证据 / 检索没跑成 / 元数据查挂了）一旦共用一个判据，用户就会拿
+# 系统故障当事实否定。键名以 _failed 结尾的集合被 tests/test_answer_evidence_gate.py 钉住全等。
 RETRIEVAL_FAILURE_MARKERS = (
     "embedding_search_failed",
     "hyde_failed",
     "web_search_failed",
     "rerank_failed",
+    "metadata_query_failed",
 )
 
 class NodeAnswerOutput(NodeBase):

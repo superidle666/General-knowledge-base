@@ -1,18 +1,21 @@
-"""库级清单型元问题前置拒答闸（R16）的离线守卫。
+"""库级清单型句式判定（R16）与回滚路径的守卫。
+
+**本闸已被元数据闸接管**（同一格现在真答而不是拒答），正常路径的守卫全部在
+`tests/test_metadata_gate.py`。本文件只留两件东西：
+
+1. **句式判定本身**：`is_library_inventory_question` 被元数据闸直接复用（不另起一套正则），
+   它接住/放过哪些句子仍是需要钉住的口径；
+2. **回滚开关下的那条旧路径**：`METADATA_ANSWER_DISABLE=1` 时行为必须逐字等于改造前，
+   否则那个开关就不是回滚，而是第三套行为。
+
+下面的行为用例全部在开关打开的状态下跑（autouse fixture 统一设），因此它们验的是
+"旧行为还在"，而不是"旧行为是默认行为"——后者由 `test_metadata_gate` 里那句
+"清单句现在会真答出来"钉着。
 
 为什么需要它：用户问"知识库里有哪些华为的产品"时，内容检索链路本质上答不了——库里每份
 文档只描述自己，不存在"产品清单"这种切片，于是与该 query 最近的总是手册前言/法律声明段
 （"本指南仅供参考，产品信息请以实物为准" + 官网链接），模型照着它答，用户看到的就是
 "基于 5 个来源 + 一堆官方渠道"这种答非所问。
-
-设想过的"把本库实体词表枚举给模型"方案要多花 token 再加一次生成调用，库一大成本就失控；
-本闸按用户决策改成**纯规则前置短路**：命中清单型问法、且用户没点名任何可对齐实体 →
-直接回固定话术，零检索零生成零外呼（也省掉后面那次实体抽取 LLM）。
-
-两层守卫：
-1. 行为：驱动 NodePrepareQuery，正例短路成固定话术，并断言实体对齐整段没跑；
-2. 反护栏：提到任何实体形状/本库词表里的名字/带指代的问法一律照常走检索（宁查勿否），
-   disabled 库与 required 空壳库（词表为空、无可对齐能力）整段不生效，保证零回归。
 """
 
 from __future__ import annotations
@@ -25,7 +28,10 @@ from processor.query_processor.inventory_gate import (
     is_library_inventory_question,
 )
 from processor.query_processor.nodes import node_prepare_query as node_module
-from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
+from processor.query_processor.nodes.node_prepare_query import (
+    METADATA_ANSWER_DISABLE_ENV,
+    NodePrepareQuery,
+)
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
 
@@ -34,6 +40,12 @@ VOCABULARY = [
     {"name": "华为平板 C7 用户指南", "aliases": []},
     {"name": "华为擎云 B530 用户指南", "aliases": []},
 ]
+
+
+@pytest.fixture(autouse=True)
+def _rollback_to_r16(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把回滚开关拧开：本文件所有用例验的都是"改造前那条链还活着"。"""
+    monkeypatch.setenv(METADATA_ANSWER_DISABLE_ENV, "1")
 
 
 def _state(

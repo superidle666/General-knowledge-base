@@ -45,6 +45,9 @@ class QueryGraphState(TypedDict, total=False):
     entity_filter_relaxed: bool  # 带实体过滤零召回后是否已放宽为“只带库隔离条件”重查过一次（放宽是兜底，既非故障也非零命中；下游增强检索与日志据此区分）
     hyde_failed: bool  # HyDE 链路是否失败（失败时该路召回为空，不阻断主链路）
     web_search_failed: bool  # 联网检索是否失败（失败时仅用本地结果继续回答）
+    # 元数据画像读失败（与“库里没有这些内容”严格区分：把系统故障说成事实否定是用户拿去做决定的错信息）。
+    # 登记进 node_answer_output.RETRIEVAL_FAILURE_MARKERS（键名以 _failed 结尾的集合被静态守卫钉住全等）。
+    metadata_query_failed: bool
     sources: list  # 面向用户端的来源列表
 
     # 生成过程中的数据
@@ -54,7 +57,7 @@ class QueryGraphState(TypedDict, total=False):
 
     # 辅助信息
     item_names: List[str]  # 提取出的商品名称
-    intent: str  # 意图标签：chitchat=命中闲聊意图闸；inventory_refusal=库级清单型元问题被前置拒答（两者都跳过检索与生成走固定话术）；conversation_echo=对话回指，同样短路但答案由历史回读而非固定话术；meta_rewrite=改写型元指令（不短路：只把检索词换成上一轮真问题，照常检索与生成）；其余为正常知识问答
+    intent: str  # 意图标签，**取值集合的唯一来源是 processor/query_processor/intents.py 的 ALL_INTENTS**（全等静态守卫钉住，新增取值不登记就红）：chitchat / inventory_refusal（R16 旧拒答，仅回滚开关下出现）/ conversation_echo / meta_rewrite（这两者中 meta_rewrite 不短路）/ metadata_entity / metadata_document / metadata_stats / metadata_config / metadata_unsupported / metadata_unavailable；其余为正常知识问答（**不写 intent**，保持键缺失）
     rewritten_query: str  # 改写后的问题（专供检索：会按历史补入实体，解决“它/这个”一类指代）
     query_entity_text: str  # 本轮用户原文（未经改写）：实体对齐的拒答判定只看它，改写串里回填的型号不算“用户点名了型号”
     meta_instruction: str  # 本轮是改写型元指令（“换个说法/用表格列一下”）时的指令原文：不进检索词，只作为呈现要求进生成 prompt
@@ -74,6 +77,14 @@ class QueryGraphState(TypedDict, total=False):
     # 下一轮才能认出“用户在回答哪一问”（反问闭环，见 entity_confirm.last_clarify_round）。
     # 必须在这里声明：TypedDict 没列出的键会被 LangGraph 静默丢弃，丢了就是闭环接不上。
     entity_clarify_candidates: list
+
+    # 库元数据画像（接口层按需装载，图内只读不查）：回答“本库有哪些产品/多少份文档/开了 HyDE 没”
+    # 这类库级元问题。装载条件与口径见 backend/app/api/library_facts.py；未装载时是一个
+    # `{"loaded": False}` 的壳而不是缺键，图里的闸据此把“没装载”与“库里没数据”分开处理。
+    # 为什么不在图里直接查库：查询图跑在 asyncio.to_thread 的工作线程，MySQL 只有异步引擎且连接池
+    # 绑事件循环，图内读库要么跨 loop 要么死锁（详细推导写在那份模块的 docstring 里）。
+    # 必须在这里声明：TypedDict 没列出的键会被 LangGraph 静默丢弃。
+    library_facts: dict
 
     # 诊断埋点（先量后治的第一步）：只记录本轮实体对齐走了哪条出口，供离线统计“线上问题实际漏在哪个出口”。
     # 这两个键**不参与任何判定**：检索、生成、接口与前端都不读它们，写它们不改变任何行为，

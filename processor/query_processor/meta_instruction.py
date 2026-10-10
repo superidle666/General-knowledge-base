@@ -23,14 +23,24 @@ from __future__ import annotations
 import re
 
 from processor.query_processor.chitchat_gate import normalize_for_match
+from processor.query_processor.intents import INTENT_CONVERSATION_ECHO, INTENT_META_REWRITE
 from processor.query_processor.inventory_gate import is_library_inventory_question
+
+# 两个 intent 值现在住在 intents.py 统一登记（防同一语义两种拼法），本模块只 re-export
+# 以保持既有调用方（node_prepare_query）的 import 路径不变。
+__all__ = [
+    "CONVERSATION_ECHO_TEMPLATE",
+    "INTENT_CONVERSATION_ECHO",
+    "INTENT_META_REWRITE",
+    "is_conversation_echo",
+    "is_meta_instruction",
+    "is_regeneration_instruction",
+    "latest_answerable_user_text",
+    "latest_user_text",
+]
 
 # 回指命中后的固定话术：把上一轮问题原样回读，并给出两条明确的下一步。
 CONVERSATION_ECHO_TEMPLATE = "你刚才问的是：“{question}”。需要我换个说法再答一遍，还是直接问新的问题？"
-
-# intent 的两个新取值：回指型是短路（跳过检索与生成），改写型只是换检索词（照常生成）。
-INTENT_CONVERSATION_ECHO = "conversation_echo"
-INTENT_META_REWRITE = "meta_rewrite"
 
 # 疑问代词：回指型句式必须落在"问的是什么"上，否则不成其为回指问句。
 _ASK = r"(?:什么|啥|哪些|哪几?个?|多少|来着)"

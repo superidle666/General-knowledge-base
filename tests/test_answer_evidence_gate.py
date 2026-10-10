@@ -228,13 +228,20 @@ def test_refusal_short_circuit_exposes_empty_sources(prepare_node) -> None:
 
 
 def test_clarify_short_circuit_exposes_empty_sources(prepare_node) -> None:
-    """多候选反问：同样必须产出空来源，且不能被 R5 的话术覆盖（它在答案节点之前）。"""
+    """多候选反问：同样必须产出空来源，且不能被 R5 的话术覆盖（它在答案节点之前）。
+
+    显式写 lenient：本库两款都能对上“华为”这个品牌组，严格档按阶段一的规矩“不猜”（落裸搜），
+    拿不到“多候选反问”这一格。本用例测的是短路出口的 sources 三态契约，不是确认档该不该反问，
+    所以把档位在入参里钉住，而不是隐式吃代码默认值后静默改格。
+    """
     vocabulary = [
         {"name": "华为平板 C7 用户指南", "aliases": []},
         {"name": "华为平板 M6 用户指南", "aliases": []},
     ]
     _assert_short_circuit_with_empty_sources(
-        prepare_node.process(_prepare_state("华为平板有哪些型号", entity_vocabulary=vocabulary)),
+        prepare_node.process(_prepare_state(
+            "华为平板有哪些型号", entity_vocabulary=vocabulary, entity_confirm_mode="lenient"
+        )),
         "您是想问以下哪个产品",
     )
 

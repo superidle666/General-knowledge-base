@@ -31,9 +31,22 @@ from processor.query_processor.entity_confirm import (
     unlisted_brand_group,
     unlisted_model_group,
 )
+from processor.query_processor.intents import (
+    INTENT_CHITCHAT,
+    INTENT_INVENTORY_REFUSAL,
+    INTENT_METADATA_UNAVAILABLE,
+    INTENT_METADATA_UNSUPPORTED,
+)
 from processor.query_processor.inventory_gate import (
     INVENTORY_REJECT_REPLY,
     is_library_inventory_question,
+)
+from processor.query_processor.metadata_gate import (
+    METADATA_UNSUPPORTED_REPLY,
+    is_metadata_question,
+    is_unsupported_metadata_question,
+    render_metadata_answer,
+    resolve_metadata_intent,
 )
 from processor.query_processor.meta_instruction import (
     CONVERSATION_ECHO_TEMPLATE,
@@ -128,9 +141,15 @@ NO_ENTITY_CLARIFY_TEMPLATE = "您想问哪个产品？本库收录了：{candida
 UNLISTED_BRAND_TEMPLATE = "当前知识库未收录 {brand} 品牌的产品，请确认品牌或改用其它知识库。"
 # 候选多到念不完时补的那一句。老项目在这里退回答不中，本次不退：用户直接报名字就能继续。
 CLARIFY_OVERFLOW_SUFFIX = "（还有其他型号，请直接报名字）"
+# 拒答那句顺带列几项本库实有的：用户报错了型号，看见名单就知道该改报哪个，比单纯一句
+# “未收录”少一个来回。只影响措辞，不影响“什么时候该拒答”那条判定。
+REFUSE_LISTED_HINT = 3
 # R7：本轮只说到品牌（或品牌 + 品类）时按品牌组把检索收窄到本库那一款。一旦线上怀疑它
 # 收窄错了，设 BRAND_GROUP_FILTER_DISABLE=1 就退回“品牌词一律不带过滤”的旧行为。
 BRAND_GROUP_FILTER_DISABLE_ENV = "BRAND_GROUP_FILTER_DISABLE"
+# 元数据答案的回滚开关：置 1 后本闸整体退回 R16 的固定话术拒答（连 T3 顶死一起关），
+# 不改代码就能拿同一批请求做基线对比。画像仍会被装载，只是不被读。
+METADATA_ANSWER_DISABLE_ENV = "METADATA_ANSWER_DISABLE"
 
 # ---------------------------------------------------------------------------
 # 诊断埋点：实体对齐走了哪条出口（只记录，不参与任何判定）
@@ -220,13 +239,13 @@ class NodePrepareQuery(NodeBase):
             if self._chitchat_gate(state):
                 self._mark_pre_gated(state, "chitchat")
                 return self._seal_short_circuit(state)
-        # 库级清单型元问题（R16）："知识库有哪些产品"这类问法内容检索答不了（库里没有"清单"
-        # 这种切片，召回必然落在手册前言/免责声明上），且成本上也不该为它付检索与生成。
-        # 放在实体对齐之前：命中就连带省掉那次抽取 LLM 调用。只在 required 且词表非空的库
-        # 生效，判定只吃【本轮原文】（详见 _inventory_gate）。
+        # 库级元数据问题（R16 的接替者）："知识库有哪些产品"这类问法的内容检索答不了
+        # （库里没有"清单"这种切片，召回必然落在手册前言/免责声明上），且成本上也不该为它付
+        # 检索与生成。仍放在实体对齐之前：命中就连带省掉那次抽取 LLM 调用；生效范围与旧闸
+        # 逐字重合（required 且词表非空），判定只吃【本轮原文】（详见 _metadata_gate）。
         if not state.get("answer"):
-            if self._inventory_gate(state):
-                self._mark_pre_gated(state, "inventory")
+            if self._metadata_gate(state):
+                self._mark_pre_gated(state, "metadata")
                 return self._seal_short_circuit(state)
         # 实体对齐只在 required 库、且前置校验未直接给出答案时进行；disabled 库整段跳过，保持零回归。
         mode = str(state.get("entity_recognition_mode") or "disabled")
@@ -334,16 +353,108 @@ class NodePrepareQuery(NodeBase):
                 reply = reply_for(subtype)
         if subtype is None:
             return False
-        state["intent"] = "chitchat"
+        state["intent"] = INTENT_CHITCHAT
         state["answer"] = reply
         return True
 
     # ------------------------------------------------------------------
-    # 〇·五、库级清单型元问题闸：命中就固定话术短路，不进检索也不进生成（R16）
+    # 〇·五、库级元数据问题闸：命中就用元数据画像拼出答案（R16 的接替者）
+    # ------------------------------------------------------------------
+
+    def _metadata_gate(self, state: QueryGraphState) -> bool:
+        """问的是"库本身"的事实而不是某个产品的内容时，就地预置答案并返回 True。
+
+        与旧 R16 闸的三个不同：
+        ① 不拒答而是真答——事实由接口层预载在 `library_facts` 里，本方法只读 dict；
+        ② 多一条 T3（库外商业事实：价格/库存/发货）一句顶死，绝不回落内容检索；
+        ③ 句式范围从"清单"扩到"计数/配置"，三档共用同一份画像。
+
+        判定顺序不是随手排的：T3 排在实体护栏**之前**。“这个产品多少钱”带指代词，
+        按护栏会被放走，而放走的结局正是那次线上复现；但仍给“点了具体型号的价格问句”
+        留出口（手册里真的有价格表时那是能答的内容问题），所以 T3 自己的护栏不含指代词。
+
+        三道反护栏与生效范围逐字沿用 R16（宁查勿否：误拒答是硬错误，漏拒只是退回现状）。
+        """
+        if not self._entity_alignment_available(state):
+            return False
+        if self._env_disabled(METADATA_ANSWER_DISABLE_ENV):
+            # 一键回滚：退回“清单句固定话术拒答、其余一律进检索”的改造前行为。
+            return self._inventory_gate(state)
+        text = str(state.get("query_entity_text") or state.get("original_query") or "")
+        if not text.strip():
+            return False
+        if is_unsupported_metadata_question(text) and not self._turn_names_specific_product(state, text):
+            state["intent"] = INTENT_METADATA_UNSUPPORTED
+            state["answer"] = METADATA_UNSUPPORTED_REPLY
+            state["sources"] = []
+            logger.info("库外商业事实问法已一句顶死（零检索零生成）：%s", text)
+            return True
+        if not is_metadata_question(text):
+            return False
+        if REFERENCE_PATTERN.search(text):
+            return False
+        if find_shape_mentions(text):
+            return False
+        if self._query_names_known_entity(state, text):
+            return False
+        facts = state.get("library_facts")
+        profile = facts if isinstance(facts, dict) else None
+        intent = resolve_metadata_intent(text, profile)
+        if not intent:
+            # 句式探测过了但分不出口径（实际不应发生）：不短路，退回现状继续检索。
+            return False
+        if profile is None or not profile.get("loaded"):
+            # 画像没读到≠库里没有：这一格必须带故障标记，下游据它说“没能读到”而不是“没找到”。
+            state["metadata_query_failed"] = True
+            state["intent"] = INTENT_METADATA_UNAVAILABLE
+            state["answer"] = render_metadata_answer(intent, text, {})
+            state["sources"] = []
+            logger.warning("元数据画像不可用（接口层读库失败或未装载），已走降级话术：%s", text)
+            return True
+        state["intent"] = intent
+        state["answer"] = render_metadata_answer(intent, text, profile)
+        # J2：短路也要产出"来源"，且必须是空列表——缺键与"算过但没有来源"是两回事。
+        state["sources"] = []
+        logger.info("库级元数据问题已按 %s 口径作答（零检索零生成）：%s", intent, text)
+        return True
+
+    def _turn_names_specific_product(self, state: QueryGraphState, text: str) -> bool:
+        """本轮原文里点了具体产品吗（型号形状或本库词表里的名字）？指代词不算。
+
+        T3 拿它决定顶死还是放行：写了型号的价格问句可能是真内容问题（手册里就有价格表），
+        顶死它就是误拒答；只写"这个/你们家产品"的那种没有可对齐对象，放行走检索的
+        结局是拿前言与免责声明编一段“请咨询官方渠道”回来。
+        """
+        if find_shape_mentions(text):
+            return True
+        return self._query_names_known_entity(state, text)
+
+    @staticmethod
+    def _refuse_reply(state: QueryGraphState) -> str:
+        """拒答那句顺带列上本库实有的前几项（词表本来就在 state 里，零成本）。
+
+        只改措辞不改判定：什么时候该拒答仍由收紧档型号代码那条决定。列名单是为了把
+        “报错了型号”这一类来回压到一个回合，而不是为了回答“库里有哪些”——后者是元数据闸的活。
+        """
+        names = [
+            str(entry.get("name") or "").strip()
+            for entry in (state.get("entity_vocabulary") or [])
+            if isinstance(entry, dict) and str(entry.get("name") or "").strip()
+        ]
+        if not names:
+            return REFUSE_TEMPLATE
+        return f"{REFUSE_TEMPLATE}本库收录了：{'、'.join(names[:REFUSE_LISTED_HINT])}。"
+
+    # ------------------------------------------------------------------
+    # 〇·五·旧、R16 固定话术拒答闸（仅在 METADATA_ANSWER_DISABLE=1 时走到）
     # ------------------------------------------------------------------
 
     def _inventory_gate(self, state: QueryGraphState) -> bool:
         """问的是"库本身有哪些产品"而不是"某个产品的内容"时，就地预置拒答话术并返回 True。
+
+        **本方法已不是正常路径**：同一格现在由 `_metadata_gate` 真答出来，只有
+        `METADATA_ANSWER_DISABLE=1` 回滚时才会走到这里（拿旧行为做基线对比）。保留而不删除
+        是为了那个开关能一键退回改造前，下面的三道护栏与固定话术一字未改。
 
         三道反护栏全部取"宁查勿否"：误拒答是用户可见的硬错误，漏拒只是退回现状（继续检索），
         所以只要本轮原文里出现任何实体线索就放走：
@@ -369,7 +480,7 @@ class NodePrepareQuery(NodeBase):
             return False
         if self._query_names_known_entity(state, text):
             return False
-        state["intent"] = "inventory_refusal"
+        state["intent"] = INTENT_INVENTORY_REFUSAL
         state["answer"] = INVENTORY_REJECT_REPLY
         # J2：短路也要产出"来源"，且必须是空列表——缺键与"算过但没有来源"是两回事，
         # 前端按后者隐藏徽标，按前者会拿到 undefined。
@@ -551,7 +662,7 @@ class NodePrepareQuery(NodeBase):
         elif self._query_names_model_code(state, mentions):
             # 仅当【当前问题本身】点名了一个具体型号代码（如 APL-005）而本库词表查无，才拒答以防跨产品串答；
             # 品牌词/前缀/错别字一律走下面的 best-effort，不拒答。
-            state["answer"] = REFUSE_TEMPLATE
+            state["answer"] = self._refuse_reply(state)
             # `model_code_named` 只在这一格记：它是走到这个 elif 的前提条件，本身恒真；
             # 其余分支没评估过这个判据，补个 False 会被读成“评估过且为假”。
             self._mark_align_exit(state, EXIT_REFUSE, model_code_named=True, **signals)
@@ -632,7 +743,7 @@ class NodePrepareQuery(NodeBase):
             )
             return
         if self._query_names_model_code(state, products):
-            state["answer"] = REFUSE_TEMPLATE
+            state["answer"] = self._refuse_reply(state)
             self._mark_align_exit(state, EXIT_REFUSE, model_code_named=True, **signals)
             return
         unlisted_model = unlisted_model_group(written, names)

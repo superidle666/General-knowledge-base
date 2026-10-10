@@ -21,6 +21,8 @@ from processor.query_processor.nodes.node_prepare_query import (
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
 API_QUERY = PROJECT_ROOT / "backend" / "app" / "api" / "query.py"
+API_MYSQL = PROJECT_ROOT / "backend" / "app" / "api" / "mysql.py"
+API_LIBRARY_FACTS = PROJECT_ROOT / "backend" / "app" / "api" / "library_facts.py"
 API_HISTORY = PROJECT_ROOT / "utils" / "mongo_history_utils.py"
 
 
@@ -377,15 +379,38 @@ def test_call_entity_llm_swallows_failures_and_returns_empty(monkeypatch) -> Non
 # --------------------------------------------------------------------------
 
 def test_query_api_injects_entity_mode_at_both_entrypoints() -> None:
-    """同步与流式两条链路都要注入识别模式、确认闸档位并载入词表，只改一条会两个入口行为不一致。"""
+    """同步与流式两条链路都要注入识别模式、确认闸档位、词表与元数据画像，只改一条会两个入口行为不一致。"""
     text = API_QUERY.read_text(encoding="utf-8")
     # 两个运行入参都注入模式（同一段字面量），此外 _load_entity_vocabulary 内部还有一处模式判断
     assert text.count('"entity_recognition_mode": str(library.entity_recognition_mode or "disabled")') == 2
     assert text.count('"entity_confirm_mode": str(library.entity_confirm_mode or "strict")') == 2
     assert text.count('"entity_vocabulary": entity_vocabulary') == 2
     assert "async def _load_entity_vocabulary" in text
-    # 词表只取就绪且未删除文档，避免命中已下线实体却召不回切片
-    assert 'Document.status == "ready"' in text and "Document.deleted_at.is_(None)" in text
+    # 元数据画像同样必须两入口成对注入：漏一个不是报错，而是“同一个问题在同步入口答得出、
+    # 在流式入口答不出”——前端默认走流式，那种不一致比都不支持更难查。
+    assert text.count('"library_facts": library_facts') == 2
+    assert text.count("await _load_library_facts_if_needed(") == 2
+
+
+def test_readiness_scope_is_defined_in_one_place_only() -> None:
+    """“ready + 未删”这套口径只允许住在一处。
+
+    它原本在 query.py、mysql.py 以及两份离线脚本里各抄了一遍，改一处忘三处的表现不是报错，
+    而是“清单里混进了待确认和已删除的文档”——用户会拿那个数去核对。接口层现在三处都引
+    `READY_DOCUMENT_CLAUSES`（词表装载、来源回填、元数据画像），字面量只能在画像层出现一次
+    （eval/ 那两份是离线脚本、自带连库代码，不在本守卫范围内）。
+
+    只钉 `status == "ready"` 而不钉 `deleted_at.is_(None)`：后者在“文档列表要不要含已删”
+    这类与就绪口径无关的查询里本来就该出现，把它钉死会让守卫误报并诱使人绕开它。
+    """
+    facts_text = API_LIBRARY_FACTS.read_text(encoding="utf-8")
+    assert 'Document.status == "ready"' in facts_text
+    assert "Document.deleted_at.is_(None)" in facts_text
+    for path in (API_QUERY, API_MYSQL):
+        text = path.read_text(encoding="utf-8")
+        assert "*READY_DOCUMENT_CLAUSES" in text, f"{path.name} 还在自带就绪口径"
+        assert 'Document.status == "ready"' not in text, \
+            f"{path.name} 里又写了一遍就绪条件，它应当只住在 library_facts.py"
 
 
 def test_clarify_candidates_reach_the_session_history() -> None:

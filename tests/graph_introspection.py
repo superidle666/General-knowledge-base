@@ -124,6 +124,88 @@ def collection_literal(path: Path, variable: str) -> set[str]:
     raise AssertionError(f"{path.as_posix()} 中找不到模块级变量 {variable}，可能已被重构，请同步更新用例")
 
 
+def module_str_constants(path: Path) -> dict[str, str]:
+    """取模块级字符串常量：`NAME = "value"`，带类型标注的写法也认。"""
+    found: dict[str, str] = {}
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        targets: list[ast.expr] = []
+        container: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            targets, container = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets, container = [node.target], node.value
+        else:
+            continue
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        if isinstance(container, ast.Constant) and isinstance(container.value, str):
+            found[targets[0].id] = container.value
+    return found
+
+
+def subscript_literal_writes(
+        paths: list[Path], variable: str, key: str,
+        extra_constants: dict[str, str] | None = None, allow_dynamic: bool = False) -> set[str]:
+    """收集若干文件里往 `variable["key"]` 写入的**字符串取值**集合（跟字面值，不跟键名）。
+
+    `state_key_writes` 只取键名不取值，回答不了“这个字段一共会被写成哪几个值”；而 intent
+    这种要被下游按字面量统计的字段，同一个语义出现两种拼法不会报错，只会让报表漏一半。
+    覆盖三种形态：
+    - `state["intent"] = "字面量"`
+    - `state["intent"] = INTENT_XXX`（先查被扫文件的模块级常量，再查 extra_constants
+      里调用方补的映射——从 intents 模块拿到的那张表，用于解“常量住在别的模块”的写法）
+    - `state.update({"intent": ...})` / `state.setdefault("intent", ...)`
+
+    认不出的写入形态（函数调用、变量、三元）默认直接抛错：静默漏计比误报难查得多。
+    确实要接住“从另一个函数算出来的值”时传 `allow_dynamic=True`，这类写入会以 `~` 前缀
+    原样入集，调用方就能把“动态写入点有几个、分别是什么表达式”也当断言目标，而不是
+    默默少算一个值。
+    """
+    constants: dict[str, str] = dict(extra_constants or {})
+    for path in paths:
+        constants.update(module_str_constants(path))
+    found: set[str] = set()
+
+    def resolve(value: ast.expr | None, where: str) -> None:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            found.add(value.value)
+            return
+        if isinstance(value, ast.Name) and value.id in constants:
+            found.add(constants[value.id])
+            return
+        if allow_dynamic and value is not None:
+            found.add(f"~{ast.unparse(value)}")
+            return
+        raise AssertionError(
+            f"{where} 对 {variable}[{key!r}] 的写法不是字符串常量也不是已登记的常量名，"
+            "本守卫认不出来（确需动态值请传 allow_dynamic）"
+        )
+
+    for path in paths:
+        rel = path.relative_to(PROJECT_ROOT).as_posix()
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Subscript) and _subscript_name(target, variable) == {key}:
+                        resolve(node.value, f"{rel}:{node.lineno}")
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == variable
+                and node.func.attr in {"update", "setdefault"}
+                and node.args
+            ):
+                first = node.args[0]
+                if node.func.attr == "update" and isinstance(first, ast.Dict):
+                    for dict_key, dict_value in zip(first.keys, first.values):
+                        if isinstance(dict_key, ast.Constant) and dict_key.value == key:
+                            resolve(dict_value, f"{rel}:{node.lineno}")
+                elif node.func.attr == "setdefault" and isinstance(first, ast.Constant) and first.value == key:
+                    resolve(node.args[1] if len(node.args) > 1 else None, f"{rel}:{node.lineno}")
+    return found
+
+
 def class_method_names(path: Path, class_name: str) -> set[str]:
     """取类里直接定义的方法名（不含继承）。
 

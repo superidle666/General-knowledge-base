@@ -6,7 +6,7 @@
 2. 消费方接线：查询侧两个文件与导入侧文件名 token 都必须取自 utils.entity_patterns，
    不得再各自 re.compile 一套型号形状（否则又回到"三套正则互不一致"的起点）。
 3. 端到端：归一后实体对齐链路的两个关键取舍——中文紧邻的型号代码现在认得出（会拒答），
-   形状同式的版本号认得出但不拒答（退回 best-effort）。
+   形状同式的版本号认得出但不拒答（宽松档退 best-effort，严格档的单款库会直接收窄）。
 """
 
 from __future__ import annotations
@@ -243,17 +243,20 @@ def test_old_local_constants_are_gone() -> None:
 def test_shape_extraction_is_reused_instead_of_duplicated() -> None:
     """所有“扫形状抽实体”的地方都只能调同一个公共函数；调用点数变了就得逐个核实。
 
-    现行五处：① `_extract_mentions` 的正则通道；② `_rewrite_query_with_history` 从历史借型号；
+    现行七处：① `_extract_mentions` 的正则通道；② `_rewrite_query_with_history` 从历史借型号；
     ③ `_inventory_gate` 的反护栏（R16：本轮提到了任何实体形状就不当清单问题拒）；
     ④ `_backfill_ellipsis_anchor` 的前置闸①（检索词里已有实体就不叠加话题锚）；
-    ⑤ `_topic_entity_from_history` 从【用户】历史里取话题锚（M4）。
-    ④⑤ 都是“同一段文本换个用途”，口径必须与抽取/拒答那两路一致，所以同样走公共函数——
+    ⑤ `_topic_entity_from_history` 从【用户】历史里取话题锚（M4）；
+    ⑥ `_metadata_gate` 的反护栏（接替 R16 的那道闸：点了具体型号就不当库级元问题顶掉）；
+    ⑦ `_turn_names_specific_product`（T3 的出口：写了型号的价格问句可能是真内容问题，放行去检索）。
+    ④⑤ 都是“同一段文本换个用途”，口径必须与抽取/拒答那两路一致，所以同样走公共函数；
+    ⑥⑦ 与 ③ 同理——同一句“用户到底有没有给出具体对象”的判据不能在新闸里再写一遍。
     required 库还多一层词表优先（`_vocab_entities_in`），那是正则抽不到的纯中文实体名的补充，
     不是另写一套形状。
     坚持等于而不是“至少”：新增调用点必须说明它复用的是同一口径，而不是在别处又写了一套正则
     （自写一套正则由上一条“文件不得自带型号正则”的守卫兜住）。
     """
-    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 5
+    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 7
 
 
 # --------------------------------------------------------------------------
@@ -268,11 +271,14 @@ def node(monkeypatch):
     return prepared
 
 
-def _required_state(query: str, vocabulary: list[dict]) -> dict:
+def _required_state(query: str, vocabulary: list[dict], confirm_mode: str = "strict") -> dict:
     return {
         "original_query": query,
         "library_id": 7,
         "entity_recognition_mode": "required",
+        # 显式写下确认档：以前这里不传键、隐式吃代码默认 strict，导致同一个用例名下的
+        # “版本号不拒答”在两个档里其实是两种结局，改档时静默漂移。
+        "entity_confirm_mode": confirm_mode,
         "entity_vocabulary": vocabulary,
     }
 
@@ -285,10 +291,31 @@ def test_cjk_adjacent_unknown_model_now_refuses(node) -> None:
 
 
 def test_version_like_mention_stays_best_effort(node) -> None:
+    """版本号形状的词不算“用户点了型号”：宽松档不猜、也不拒答，退回不带过滤检索。"""
     for query in ("windows10 怎么设置", "G740 报错怎么解决", "wifi6 连不上"):
-        result = node.process(_required_state(query, [{"name": "HAK-180", "aliases": []}]))
+        result = node.process(_required_state(query, [{"name": "HAK-180", "aliases": []}], "lenient"))
         assert result["item_names"] == [], query
         assert not result.get("answer"), f"{query} 被误拒答了"
+
+
+def test_strict_single_product_library_narrows_instead_of_guessing(node) -> None:
+    """严格档 + 本库仅一款：被归到“这句没写出型号”的词会收窄到那一款（阶段一确认闸第五档）。
+
+    与上一条的旧预期相冲突——库里就一个对象时，反问比直接收窄更难受，这是阶段一定下的设计，
+    本轮不改源码，只把现状钉住；“到底该不该收窄”拿 `eval/exit_probe.py` 的出口分布定夺。
+    `G740` 是另一种命运：它长得像型号代码，算“提到了但没命中”（拿不到那款唯一实体），
+    收窄只发生在“根本没写出型号”那一侧——两档的分工全在这个差异里，所以一并钉住。
+    """
+    vocabulary = [{"name": "HAK-180", "aliases": []}]
+
+    narrowed = node.process(_required_state("windows10 怎么设置", vocabulary))
+    assert narrowed["item_names"] == ["HAK-180"]
+    assert narrowed["entity_align_exit"] == "single_product_narrowed"
+    assert not narrowed.get("answer"), "收窄不是拒答"
+
+    bare = node.process(_required_state("G740 报错怎么解决", vocabulary))
+    assert bare["item_names"] == []
+    assert bare["entity_align_exit"] == "no_brand_group"
 
 
 def test_chitchat_guard_uses_the_loose_tier() -> None:

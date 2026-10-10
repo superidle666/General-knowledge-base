@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.app.api.library_facts import READY_DOCUMENT_CLAUSES
 from backend.app.api.schemas import (
     ChunkOut, DocumentCreate, DocumentDetailOut, DocumentListOut, DocumentReprocessOut, DocumentReprocessRequest,
     DocumentTagsUpdate,
@@ -555,20 +556,21 @@ async def library_entity_coverage(session: AsyncSession, library: Library) -> di
     口径必须与查询侧取词表一致（backend/app/api/query.py 的 _load_entity_vocabulary）：
     只看未删除且 status=ready 的文档，否则“已覆盖”会虚高。存在覆盖差时检索侧对齐会因
     词表不足而不起作用，而这件事在界面上完全看不出来，所以在这里量化出来。
+
+    两边现在吃的是同一份 `READY_DOCUMENT_CLAUSES`（元数据事实口径的唯一来源），
+    “一致”不再靠注释和人的记性保证。
     """
     ready_count = (await session.execute(
         select(func.count(Document.id)).where(
             Document.library_id == library.id,
-            Document.status == "ready",
-            Document.deleted_at.is_(None),
+            *READY_DOCUMENT_CLAUSES,
         )
     )).scalar_one()
     covered_count = (await session.execute(
         select(func.count(func.distinct(Entity.document_id))).select_from(Entity)
         .join(Document, Document.id == Entity.document_id).where(
             Entity.library_id == library.id,
-            Document.status == "ready",
-            Document.deleted_at.is_(None),
+            *READY_DOCUMENT_CLAUSES,
         )
     )).scalar_one()
     uncovered = max(0, int(ready_count) - int(covered_count))
