@@ -12,6 +12,11 @@
 离线约束：本文件顶部的 autouse fixture 把 classify_chitchat_llm 在 gate 与节点两个
 模块命名空间都 stub 成报错实现，任何用例误触真实 LLM 调用都会直接失败而不是静默联网；
 需要验证 L2 行为时用 monkeypatch 显式覆盖成假返回。
+
+两条已经定死的口径（新用例不得往回改）：
+- L2 必须收到**带说话人标注的最近几轮**（M1）：只给当前句会把"省略宾语的追问"判成
+  "让助手自我介绍"（线上实测）；因此所有 stub 都收两个位置参数 (text, history_text)。
+- 话术**一律**取自静态表：other 子类型也不采纳模型顺带生成的 reply（M9）。
 """
 
 from __future__ import annotations
@@ -30,6 +35,11 @@ from processor.query_processor.chitchat_gate import (
     is_knowledge_question,
     should_ask_llm,
 )
+from processor.query_processor.prompt.intent_classify import (
+    MAX_INTENT_HISTORY_CHARS,
+    INTENT_CLASSIFY_SYSTEM,
+    build_intent_classify_prompt,
+)
 from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
@@ -39,8 +49,8 @@ QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
 def _no_real_llm(monkeypatch):
     """全局守卫：离线用例里任何走到真实 LLM 的调用都立即报错，绝不允许静默联网。"""
 
-    def _boom(text: str):
-        raise AssertionError(f"离线用例不应触发真实意图分类 LLM 调用：{text!r}")
+    def _boom(text: str, history_text: str = ""):
+        raise AssertionError(f"离线用例不应触发真实意图分类 LLM 调用：{text!r} / 历史={history_text!r}")
 
     monkeypatch.setattr(chitchat_gate_module, "classify_chitchat_llm", _boom)
     monkeypatch.setattr(node_module, "classify_chitchat_llm", _boom)
@@ -146,6 +156,19 @@ def test_capability_regex_does_not_swallow_knowledge_phrases() -> None:
     assert detect_chitchat("哪里能买到配件", l1_only=True) is None
 
 
+def test_ellipsis_object_followups_are_not_caught_by_l1() -> None:
+    """M2 实测回归（例 1/例 3 原句）：省略主语的属性追问与能力裸词同形，不得在 L1 被零降级吃掉。
+
+    它们不是"不拦了"，而是改走 L2：那里有历史可看，也有"拿不准就判 knowledge"的降级余地。
+    带"你"主语锚的合法打探必须仍由 _CAPABILITY_RES 接住，摘条目的代价不能外溢。"""
+    for text in ("有什么功能介绍吗", "有什么存储类型", "有什么作用", "能回答什么", "简单介绍一下"):
+        assert detect_chitchat(text, l1_only=True) is None, f"属性追问被 L1 误拦：{text}"
+        assert should_ask_llm(text) is True, f"摘掉裸词后又进不了 L2：{text}"
+    assert detect_chitchat("你能提供什么", l1_only=True) == "capability"
+    assert detect_chitchat("你能做什么", l1_only=True) == "capability"
+    assert detect_chitchat("你有什么功能", l1_only=True) == "capability"
+
+
 # --------------------------------------------------------------------------
 # 二d、R1：高误拦裸词摘除 + 知识问法骨架护栏（跨领域失配的治本项）
 # --------------------------------------------------------------------------
@@ -189,9 +212,15 @@ def test_model_probe_still_intercepted_after_removing_bare_words() -> None:
 
 
 def test_bare_document_vocabulary_words_are_not_registered_probes() -> None:
-    """静态钉住："模型/model/测试"这类文档高频词不得回到子串表（与 L102-103 的注释同一口径）。"""
+    """静态钉住：文档高频词与**无主语锚的能力裸词**都不得回到子串表（与 L158-161 的注释同一口径）。"""
+    banned_terms = (
+        "模型", "model", "Model", "测试",
+        # M2：这四条与省略宾语的属性追问同形（"（这台设备）有什么功能介绍吗"），
+        # 而 L1 命中是零降级路径——不经模型、没有"拿不准就放行"的余地。
+        "能提供什么", "有什么功能", "能回答什么", "有什么作用",
+    )
     for name, phrases in chitchat_gate_module._MATCH_ORDER:
-        for banned in ("模型", "model", "Model", "测试"):
+        for banned in banned_terms:
             assert banned not in phrases, f"{name} 组又登记了裸词 {banned!r}"
 
 
@@ -241,7 +270,7 @@ def test_node_answers_history_reference_question_with_generation(monkeypatch) ->
     node = NodePrepareQuery()
     calls: dict[str, object] = {"llm": False, "align": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         calls["llm"] = True
         return "identity", "不该被调用"
 
@@ -257,6 +286,31 @@ def test_node_answers_history_reference_question_with_generation(monkeypatch) ->
 # --------------------------------------------------------------------------
 # 二c、L2 门禁与返回解析（纯函数，不触发调用）
 # --------------------------------------------------------------------------
+
+def test_intent_prompt_shows_recent_dialog_and_declines_the_generated_reply() -> None:
+    """M1 提示词侧守卫：分类器必须拿到【最近对话】（带说话人），且 system 里要明写
+    "省掉主语/宾语时先看上文"与"reply 不会直接发给用户"——前者是误拦的直接成因，
+    后者不让模型为了"回得好听"去执行背诗/报参数这类任务。"""
+    without = build_intent_classify_prompt("有什么存储类型")
+    assert "最近对话" not in without
+    assert "本轮输入：有什么存储类型" in without
+
+    with_history = build_intent_classify_prompt(
+        "有什么存储类型", "用户：有苹果手机吗\n助手：有，iPhone 18 Pro 是新一代苹果智能手机。"
+    )
+    assert "用户：有苹果手机吗" in with_history
+    assert "助手：" in with_history
+    assert "本轮输入：有什么存储类型" in with_history
+
+    # 历史按预算从尾部裁：不能因为一句长回答把整轮窗口顶爆
+    over = build_intent_classify_prompt("这个呢", "开" * (MAX_INTENT_HISTORY_CHARS + 500) + "尾")
+    assert "尾" in over
+    assert "开" * (MAX_INTENT_HISTORY_CHARS + 1) not in over
+
+    assert "最近对话" in INTENT_CLASSIFY_SYSTEM
+    assert "省掉了主语" in INTENT_CLASSIFY_SYSTEM
+    assert "不会直接发给用户" in INTENT_CLASSIFY_SYSTEM
+
 
 def test_llm_gate_admits_only_short_entity_free_text() -> None:
     assert should_ask_llm("今天心情不错") is True
@@ -333,7 +387,7 @@ def test_node_does_not_intercept_or_call_llm_for_concept_question(monkeypatch) -
     node = NodePrepareQuery()
     calls: dict[str, object] = {"llm": False, "align": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         calls["llm"] = True
         return "model_probe", "不该被调用"
 
@@ -365,7 +419,7 @@ def test_node_l2_fallback_hit_in_required_lib_skips_alignment(monkeypatch) -> No
     calls: dict[str, object] = {"align": False, "llm_text": None}
     node._align_entity = lambda state: calls.__setitem__("align", True)
 
-    def _fake_llm(text: str):
+    def _fake_llm(text: str, history_text: str = ""):
         calls["llm_text"] = text
         return "emotion", "听起来心情不错！有需要查的产品问题随时告诉我。"
 
@@ -377,22 +431,31 @@ def test_node_l2_fallback_hit_in_required_lib_skips_alignment(monkeypatch) -> No
     assert calls["align"] is False
 
 
-def test_node_l2_other_subtype_uses_generated_reply_with_static_fallback(monkeypatch) -> None:
-    # other 子类型：优先用模型顺带生成的回复；生成缺失时退 other 静态话术，绝不预置空 answer。
+def test_node_l2_other_subtype_never_adopts_generated_reply(monkeypatch) -> None:
+    """M9：话术一律走静态表，other 子类型也不再采纳模型现编的那句。
+
+    原实现把模型生成内容直接当 answer，等于在检索链路之外开了一个零来源、且被 R5
+    无证据守卫第一行（`answer` 非空即放行）直接放过的自由生成入口——线上实测「背一下
+    静夜思」真的背了诗，"这个药一次吃多少"一类问法同样会被凭空作答。"""
     text = "帮我测测这个新功能呀"
     node = NodePrepareQuery()
     monkeypatch.setattr(
         node_module, "classify_chitchat_llm",
-        lambda _text: ("other", "我在呢～有产品资料要查随时说。"),
+        lambda _text, _history_text="": ("other", "床前明月光，疑是地上霜。"),
     )
     state = node.process(_state(text))
-    assert state["answer"] == "我在呢～有产品资料要查随时说。"
+    assert state["answer"] in CHITCHAT_REPLIES["other"]
+    assert "床前明月光" not in state["answer"], "模型生成内容不得进入 answer"
 
+    # 已知子类型同样只用静态表（口径统一，不区分 other）
     node2 = NodePrepareQuery()
-    monkeypatch.setattr(node2, "_align_entity", lambda state: None)
-    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda _text: ("other", ""))
+    monkeypatch.setattr(
+        node_module, "classify_chitchat_llm",
+        lambda _text, _history_text="": ("greeting", "自己现编的一句话"),
+    )
     state2 = node2.process(_state(text))
-    assert state2["answer"] in CHITCHAT_REPLIES["other"]
+    assert state2["answer"] in CHITCHAT_REPLIES["greeting"]
+    assert state2["answer"] != "自己现编的一句话"
 
 
 def test_node_l2_says_not_chitchat_then_aligns_normally(monkeypatch) -> None:
@@ -400,7 +463,7 @@ def test_node_l2_says_not_chitchat_then_aligns_normally(monkeypatch) -> None:
     node = NodePrepareQuery()
     called = {"align": False}
     node._align_entity = lambda state: called.__setitem__("align", True)
-    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text: (None, ""))
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text, history_text="": (None, ""))
     state = node.process(_state("温度调多少合适"))
     assert state.get("intent") is None
     assert not state.get("answer")
@@ -413,7 +476,7 @@ def test_node_disabled_lib_gate_is_stricter_than_required(monkeypatch) -> None:
     node = NodePrepareQuery()
     reached: dict[str, bool] = {"llm": False}
 
-    def _spy(text_: str):
+    def _spy(text_: str, _history_text: str = ""):
         reached["llm"] = True
         return None, ""
 
@@ -422,6 +485,64 @@ def test_node_disabled_lib_gate_is_stricter_than_required(monkeypatch) -> None:
     assert reached["llm"] is False
     node.process(_state(text, mode="required"))
     assert reached["llm"] is True
+
+
+def test_node_l2_passes_recent_dialog_with_speaker_labels(monkeypatch) -> None:
+    """M1：节点必须把带说话人标注的最近几轮（**含助手回答**）交给分类器。
+
+    只给当前句时分类器只能看到"让助手自我介绍"，必然误拦（线上实测的同一形状）。
+    本例的两个约束都是必须的（否则 M4/指代通道会先把本轮接走，根本走不到 L2）：
+    - 本轮不带"有什么/多少"这类属性骨架：否则 M4 先回填话题锚，回填后带上了实体信号，
+      就不再需要一次分类（确定通道优于模型临场判断，见 tests/test_multi_turn_entity_anchor.py）；
+    - 上一轮的**用户句**里没有实体（只是"有哪些手机"），否则指代通道已经替本轮把锚补上了。
+      这时实体锚只在助手回答里，而抽取/指代两条通道都刻意不看助手——只有 L2 看。"""
+    seen: list[tuple[str, str]] = []
+
+    def _spy(text: str, history_text: str = ""):
+        seen.append((text, history_text))
+        return None, ""
+
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", _spy)
+    node = NodePrepareQuery()
+    node._align_entity = lambda state: None
+    state = _state("这个能干什么")
+    state["history"] = [
+        {"role": "user", "text": "有哪些手机"},
+        {"role": "assistant", "text": "有，iPhone 18 Pro 是新一代苹果智能手机。" + "细节描述" * 100},
+    ]
+    node.process(state)
+
+    assert seen, "该走 L2 却没调用分类器"
+    query, history_text = seen[0]
+    assert query == "这个能干什么"
+    assert "用户：有哪些手机" in history_text, history_text
+    assert "助手：" in history_text, "分类器拿不到助手回答就没有实体锚"
+    assert len(history_text) <= node_module.INTENT_HISTORY_CHARS
+
+
+def test_recent_dialog_text_covers_both_speakers_and_bounds_length() -> None:
+    """历史窗口的三个硬约束：只收 user/assistant、单条按头部截断、总量不超预算。
+
+    单条截断而不是尾部截：助手回答的产品名几乎都在首句（"iPhone 18 Pro 是…"），
+    去掉尾部还能留下实体锚，去掉头部就只剩下"……详见附录"了。"""
+    dialog = NodePrepareQuery._recent_dialog_text
+    assert dialog([]) == ""
+    assert dialog(None) == ""
+    assert dialog("不是列表") == ""
+    assert dialog([{"role": "system", "text": "你是一个助手"}]) == ""
+    assert dialog([{"role": "user"}]) == ""
+
+    text = dialog([
+        {"role": "user", "text": "有苹果手机吗"},
+        {"role": "assistant", "text": "A" * 500},
+        {"role": "user", "text": "有什么存储类型"},
+        {"role": "assistant", "text": "B" * 500},
+        {"role": "user", "text": "这个能干什么"},
+    ])
+    assert "这个能干什么" in text, "最近一轮必须在窗口里"
+    assert "有什么存储类型" in text
+    assert all(line.split("：")[1] and len(line) <= node_module.INTENT_TURN_CHARS + 3 for line in text.split("\n"))
+    assert len(text) <= node_module.INTENT_HISTORY_CHARS
 
 
 # --------------------------------------------------------------------------
@@ -445,7 +566,7 @@ def test_required_lib_without_vocabulary_uses_strict_gate(monkeypatch) -> None:
     text = "帮我测测这个新功能呀"  # 10 字：宽门禁放行、严门禁拦住
     reached = {"llm": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         reached["llm"] = True
         return None, ""
 
@@ -464,7 +585,7 @@ def test_required_lib_without_vocabulary_still_gates_truly_short_text(monkeypatc
     # 收紧不等于关掉：≤ 8 字的无实体短句在空壳 required 库里仍然会送 L2 判定。
     reached = {"llm": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         reached["llm"] = True
         return None, ""
 
@@ -481,7 +602,7 @@ def test_node_llm_exception_falls_through_to_retrieval(monkeypatch) -> None:
     called = {"align": False}
     node._align_entity = lambda state: called.__setitem__("align", True)
 
-    def _raise(text: str):
+    def _raise(text: str, history_text: str = ""):
         raise RuntimeError("模拟上游挂起")
 
     monkeypatch.setattr(node_module, "classify_chitchat_llm", _raise)
@@ -520,7 +641,7 @@ def test_vocab_probe_skips_l2_for_own_product_name(monkeypatch) -> None:
     node = NodePrepareQuery()
     calls: dict[str, object] = {"llm": False, "align": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         calls["llm"] = True
         return None, ""
 
@@ -538,7 +659,7 @@ def test_vocab_probe_still_calls_l2_for_unknown_entity(monkeypatch) -> None:
     node = NodePrepareQuery()
     reached = {"llm": False}
 
-    def _spy(_text: str):
+    def _spy(_text: str, _history_text: str = ""):
         reached["llm"] = True
         return None, ""
 

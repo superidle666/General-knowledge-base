@@ -16,6 +16,7 @@ import re
 import time
 from typing import List, Dict, Tuple
 
+from processor.query_processor.chitchat_gate import normalize_for_match
 from processor.query_processor.prompt.answer_prompt import ANSWER_PROMPT
 from tool.logger import configure_logging, logger
 
@@ -28,6 +29,9 @@ from utils.task_utils import set_task_result, add_done_task
 
 MAX_CONTEXT_CHARS = 12000
 MAX_HISTORY_CHARS = 3000
+# 说明句里最多点几个实体名：一句“本库未收录 A、B、C 的资料”同等于没说，
+# 而实体多到三个以上时本来就不是“单一型号窄窄收窄”的那种场景。
+MAX_DISCLOSED_ENTITIES = 2
 # 静态短答（闲聊话术/校验提示/拒答反问）不经检索与生成，瞬时送达会像"机器人占位"；
 # 推送前稍作停顿，让对话节奏接近真实回答。只加在流式 delta 推送前，非流式接口不拖慢。
 STATIC_REPLY_DELAY_SECONDS = 1.5
@@ -38,6 +42,52 @@ INSUFFICIENT_EVIDENCE_REPLY = (
     "当前知识库没有找到与这个问题相关的内容，可以换个说法、补充具体型号，或改用其他知识库再问一次。"
 )
 RETRIEVAL_INCOMPLETE_REPLY = "本次检索没有完成，暂时无法依据知识库回答，请稍后重试或换个问法。"
+
+# 生成调用本身挂掉时的兜底话术（与“库里没证据”是两回事，提出来才能被别处准确识别）。
+GENERATION_FAILED_REPLY = "抱歉，生成回答时出现错误。"
+
+# M7：实体过滤被放宽过（用户点名的型号在本库带过滤召不回任何切片，于是拆掉过滤重查了一次）
+# 时，窗口里坐的全是“别的型号”的切片。让模型照着它们答，等于拿隔壁产品的参数冒充答案
+# （线上实测：话题是 iPhone，答成“该设备 UFS4.1 / 12+256GB”）。这既不是“库里没有”（那是 R5
+# 的语义槽，而本句前面刚刚检索到了内容），也不是“检索故障”，所以另起一条**补充说明**前置到
+# 生成的答案上：把“已经拆过过滤”这个事实告知用户，而不是默默交付一份看着完整的答非所问。
+RELAXED_FILTER_NOTICE_TEMPLATE = (
+    "（说明：本库暂未收录「{entity}」的专属资料，以下内容取自最接近的相关文档，"
+    "可能与该型号不完全对应。）"
+)
+
+# 图片出口的语义否决词表：召回切片里有一类图压根不是“产品外观/结构示意”，而是封面
+# 条形码、铭牌、认证标志这类标识图。它们的 alt 是导入期多模态模型写的，本身就写着“条形码”；
+# 而白名单只校验 URL 出处不看内容，所以模型一旦把它当外观图引用，用户看到的就是“一台机器
+# 配了一张条码”（线上实测：HAK 180 烫金机的回答底部渲染了手册封面条码）。提示词里的
+# 4.2/4.3/4.4 三条约束都明确禁过这种用法，模型仍概率性违反 → 只能在出口做确定性否决。
+NON_APPEARANCE_ALT_TERMS: Tuple[str, ...] = (
+    "条形码", "条码", "二维码", "铭牌", "标签", "封签", "防伪", "合格证",
+    "包装", "封面", "水印", "认证标志", "logo",
+)
+# 与 DRIFT_GUARD_DISABLE 同族：设成 1/true/yes 时退回“只看 URL 出处”的旧白名单行为。
+IMAGE_ALT_VETO_DISABLE_ENV = "IMAGE_ALT_VETO_DISABLE"
+
+
+def _non_appearance_term(alt: str, question: str) -> str:
+    """alt 命中标识图词表时返回命中的词，否则返回空串（空串 = 放过）。
+
+    两个放过方向是刻意的：alt 缺失（旧集合、无摘要图）时拿不到语义依据，不能因此屏蔽真图；
+    本轮问题自己就在问这个东西（“条码在哪看”“铭牌上写了什么”）时，这张图正是答案。
+    """
+    normalized_alt = normalize_for_match(alt)
+    if not normalized_alt:
+        return ""
+    normalized_question = normalize_for_match(question)
+    for term in NON_APPEARANCE_ALT_TERMS:
+        normalized_term = normalize_for_match(term)
+        if not normalized_term or normalized_term not in normalized_alt:
+            continue
+        if normalized_term in normalized_question:
+            return ""
+        return term
+    return ""
+
 
 # 检索链路的失败标记：任一为真就说明至少有一路没跑成，不能当成"查过了但没有"。
 # 与 node_search_embedding / node_web_search_mcp / node_rerank 写入 state 的键一一对应。
@@ -89,11 +139,21 @@ class NodeAnswerOutput(NodeBase):
             # 阶段三：  如果没有answer则 调用大模型输出答案
             self._step_3_generate_response(state, prompt)
 
+            # 阶段三·五：把“实体过滤已放宽”这件事补进答案（M7）。必须排在生成之后、
+            # 图片提取与写历史之前：说明要跟着正文一起落库与推 FINAL（流式下 delta 已推完，
+            # 但接口层 FINAL 携的是全量 answer、前端按它覆盖式渲染，所以补得上去）。
+            # 放在这个分支里而不是函数入口：“无证据”的固定话术走的是 answer 已存在的分支，
+            # 它已经说清楚了，叠一条“已拆过滤”只会自相矛盾。
+            self._step_3b_disclose_relaxed_filter(state)
+
 
         # 阶段四： 提取图片URL（用于历史记录和前端展示）
+        # 判定“本轮在问什么”只吃本轮原文（与 R2 给拒答判定立的口径一致）：历史里上一轮问过
+        # “条码在哪看”，不应让本轮的外观图被豁免。
         image_urls = self._extract_images_from_answer(
             state.get("answer") or "",
             state.get("reranked_docs") or [],
+            str(state.get("query_entity_text") or state.get("original_query") or ""),
         )
         state["image_urls"] = image_urls
         # 图片白名单之外的 markdown 引用是模型臆造的（参考内容里根本没有这张图），
@@ -151,6 +211,29 @@ class NodeAnswerOutput(NodeBase):
             retrieval_failed,
             state.get("original_query", ""),
         )
+
+    def _step_3b_disclose_relaxed_filter(self, state: QueryGraphState) -> None:
+        """本轮拆过实体过滤时，在答案头上补一句“这份资料不是那个型号的”（M7）。
+
+        只动描述、不动结论：不拒答、不改 sources、也不抢 `INSUFFICIENT_EVIDENCE_REPLY` /
+        `RETRIEVAL_INCOMPLETE_REPLY` 的语义槽——那两条说都是“结果”（库里没有 / 检索没跑成），
+        本条说的是“依据的来源”，三者不能混用。
+
+        不触发的三种情形都是“说了也没用或会说错”：话题实体不明确（`item_names` 为空，
+        本来就是不带过滤检索，谈不上放宽）、生成自己挂了（输出的是兜底错误句，没结论可修正）、
+        说明已在正文里（同一请求重入时不叠第二遍）。
+        """
+        if not state.get("entity_filter_relaxed"):
+            return
+        names = [str(name).strip() for name in (state.get("item_names") or []) if str(name).strip()]
+        answer = str(state.get("answer") or "").strip()
+        if not names or not answer or answer == GENERATION_FAILED_REPLY:
+            return
+        notice = RELAXED_FILTER_NOTICE_TEMPLATE.format(entity="、".join(names[:MAX_DISCLOSED_ENTITIES]))
+        if notice in answer:
+            return
+        state["answer"] = f"{notice}\n\n{answer}"
+        logger.info("【答案节点】实体过滤已放宽，已在答案前补充说明：%s", notice[:60])
 
     def _step_1_check_answer(self, state) -> bool:
           """
@@ -239,6 +322,9 @@ class NodeAnswerOutput(NodeBase):
         sources: List[Dict] = []
         for doc in used_docs:
             item = dict(doc)
+            # rerank_probe 是 node_rerank 为合并体拼的送精排副本（已按分片均摊预算、折叠过
+            # 图片），既不是正文也不是元数据：留着它会随 sources 进日志并写进 Mongo 历史。
+            item.pop("rerank_probe", None)
             raw_score = item.get("score")
             try:
                 item["score"] = float(raw_score) if raw_score is not None else None
@@ -246,6 +332,18 @@ class NodeAnswerOutput(NodeBase):
                 item["score"] = None
             item.setdefault("source", "local")
             item["score_kind"] = score_kind
+            # 合并来源才带溯源字段：合并体只以代表分片的 chunk_id 入 sources，模型实际读到的
+            # 其余几片必须靠 part_chunk_ids 才能回源（否则它们“进了 prompt 却无法溯源”）。
+            # 非合并来源的条目结构逐字不变，新字段仅在确实发生合并时出现。
+            part_chunk_ids = [part_id for part_id in (doc.get("part_chunk_ids") or []) if part_id is not None]
+            if len(part_chunk_ids) > 1:
+                item["part_chunk_ids"] = part_chunk_ids
+                item["merged_parts"] = int(doc.get("merged_parts") or len(part_chunk_ids))
+            else:
+                # 只剩一片就构不成“合并”，把切片上可能残留的标注一并摘掉：来源条目要么两个
+                # 字段都带、要么都不带，前端才不会拿到 merged_parts=1 这种自相矛盾的标注。
+                item.pop("part_chunk_ids", None)
+                item.pop("merged_parts", None)
             sources.append(item)
         return sources
 
@@ -266,10 +364,12 @@ class NodeAnswerOutput(NodeBase):
 
         "实际纳入的切片"用于让引用展示与生成所用同源：预算截断后没进 prompt 的切片，
         模型没读过，就不该出现在给用户的来源里；反之进了 prompt 的都必须可被引用。
+        装不下时按条跳过、继续试后面的短块（而不是整段收尾）：一条超长块不该挡住短答案块。
         """
         formatted_lines = []
         used_docs: List[Dict] = []
         used_chars = 0
+        skipped: List[Tuple[int, int]] = []
 
         # 从重排内容中，提取为资料字符串，不可超过限额
         # 优先使用结构化 reranked_docs（包含 source/chunk_id/url/score），便于约束与引用
@@ -310,11 +410,25 @@ class NodeAnswerOutput(NodeBase):
             doc_entry = " ".join(meta_tags) + "\n" + content
 
             if used_chars + len(doc_entry) > char_budget:
-                break
+                # 预算不够装下这一条时只跳过它、继续试后面的短块（R10）：旧写法用 break，
+                # 于是一条超长块（碎片合并恰好会造出这种）就能把后面本可装下的答案块
+                # 整体挡住，而 sources 与本函数同源，被挡掉的块连引用都不展示。
+                # 刻意不按剩余预算截断本条：截断可能把 ![](url) 从中间切断，前端按
+                # markdown 提图会直接裂图。
+                skipped.append((idx, len(doc_entry)))
+                continue
 
             formatted_lines.append(doc_entry)
             used_docs.append(doc)
             used_chars += len(doc_entry) + 2
+
+        if skipped:
+            # 以前这类丢弃完全不可见：只能从“答案少了点东西”反推。留下序号与长度便于排查
+            # “为什么高分块没进参考内容”。
+            logger.debug(
+                "---参考内容预算不足，跳过 %d 条（总预算 %d 字、已用 %d 字）：%s---",
+                len(skipped), char_budget, used_chars, skipped,
+            )
 
         return "\n\n".join(formatted_lines), used_docs, char_budget - used_chars
 
@@ -399,7 +513,7 @@ class NodeAnswerOutput(NodeBase):
                 logger.info(f"生成回答完成，长度: {len(content)}")
             except Exception as e:
                 logger.error(f"生成回答出错: {e}", exc_info=True)
-                state["answer"] = "抱歉，生成回答时出现错误。"
+                state["answer"] = GENERATION_FAILED_REPLY
 
         return state
 
@@ -469,8 +583,12 @@ class NodeAnswerOutput(NodeBase):
         logger.info(f"图片提取完成，共找到 {len(images)} 张唯一图片: {images}")
         return images
 
-    def _extract_images_from_answer(self, answer: str, docs: list[dict]) -> list[str]:
-        """只返回模型在答案中明确引用、且来自召回内容的图片。"""
+    def _extract_images_from_answer(self, answer: str, docs: list[dict], question: str = "") -> list[str]:
+        """只返回模型在答案中明确引用、且来自召回内容的图片。
+
+        出处白名单之后还有一道语义否决（alt 写着条形码/铭牌的标识图不当外观图用），
+        被否决的 URL 不进 `image_urls`、也就自动从答案正文被剥掉（见 `_sanitize_unverified_images`）。
+        """
         available_images = set(self._extract_images_from_docs(docs))
         if not available_images:
             return []
@@ -487,7 +605,43 @@ class NodeAnswerOutput(NodeBase):
             image_url = candidate.strip().rstrip(",.;，。；）")
             if image_url in available_images and image_url not in image_urls:
                 image_urls.append(image_url)
-        return image_urls
+        return self._veto_non_appearance_images(image_urls, docs, question)
+
+    # 召回切片正文里的 markdown 图片（带 alt）：alt 是导入期多模态模型写的图摘要，取它作语义依据。
+    _DOC_MD_IMAGE_WITH_ALT_RE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)\)")
+
+    def _extract_image_alts_from_docs(self, docs: list[dict]) -> Dict[str, str]:
+        """URL → alt 映射（只来自召回切片，与 `_extract_images_from_docs` 同一数据源）。
+
+        拿 alt 而不是拿模型自己写的描述：提示词 4.4 要求模型原样沿用 alt，但真发生错配时
+        模型完全可能把 alt 改写成“外观图”——只有切片里那一份是文档自己的事实。
+        """
+        alts: Dict[str, str] = {}
+        for doc in docs or []:
+            if not isinstance(doc, dict):
+                continue
+            content = str(doc.get("content") or "")
+            for alt, url in self._DOC_MD_IMAGE_WITH_ALT_RE.findall(content):
+                url = url.strip()
+                if url and url not in alts:
+                    alts[url] = alt.strip()
+        return alts
+
+    def _veto_non_appearance_images(self, image_urls: list[str], docs: list[dict], question: str) -> list[str]:
+        """把“不是外观/结构图”的引用从白名单里拿掉；开关关掉或拿不到 alt 时一律放过。"""
+        if not image_urls or self._env_disabled(IMAGE_ALT_VETO_DISABLE_ENV):
+            return image_urls
+        alts = self._extract_image_alts_from_docs(docs)
+        if not alts:
+            return image_urls
+        kept: list[str] = []
+        for image_url in image_urls:
+            term = _non_appearance_term(alts.get(image_url, ""), question)
+            if term:
+                logger.info("图片出口语义否决：这张图的 alt 写着「%s」，不是外观/结构图，不随答案展示", term)
+                continue
+            kept.append(image_url)
+        return kept
 
     # 答案正文里的 markdown 图片（允许描述文字带空格）；URL 捕获后交给白名单判定。
     _ANSWER_MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\(\s*(\S*?)(?:\s+\"[^\"]*\")?\s*\)")

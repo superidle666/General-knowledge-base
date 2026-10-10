@@ -55,6 +55,9 @@ export function normalizeSources(list: QuerySource[]): UserSource[] {
       kind: isWebSource ? 'web' : 'local',
       url: source.url,
       siteName: source.site_name,
+      // 合并来源只占 1 条名额（读几条=展示几条=top_k），但模型读到的是 N 段拼接正文：
+      // 用“含 N 段”把这个差别显式告知，而不是拆成 N 条来源。
+      mergedParts: source.merged_parts ?? null,
     }
   })
 }

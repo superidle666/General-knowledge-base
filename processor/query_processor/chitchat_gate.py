@@ -6,8 +6,10 @@
   （知识问法“什么是X”/“X是什么”/“X和Y的区别”/“怎么办”，以及对话回指“我刚问了什么”）。
   第二道存在的原因是第一道只认识消费电子词表，对技术概念/软件/流程类知识库整体失配；
   骨架只认句式不认词表，换一个领域的库照样生效；
-- L2 兜底：规则没接住不等于不是闲聊（中文变体是开放的，如"你在哪""今天心情不错"），
-  但只给"短且无实体信号、且不含问法骨架"的缝隙输入问一次小模型；正常业务问题不经过这次调用；
+- L2 兜底：规则没接住不等于不是闲聊（中文变体是开放的，如"现在几点了""背一下静夜思"），
+  但只给"短且无实体信号、且不含问法骨架"的缝隙输入问一次小模型；正常业务问题不经过这次调用。
+  L2 必须携带最近几轮对话（含助手回答、标好说话人）：省略宾语的追问（"简单介绍一下"）
+  本轮一个产品词都不沾，孤立看就是"让助手自我介绍"，只看当前句必然误拦（线上实测）；
 - 任何不确定或 LLM 异常一律不拦截，交回原有"检索 + 生成"链路，
   保证不新增"产品问题被当闲聊"的回归。
 
@@ -172,8 +174,12 @@ _MATCH_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("capability", (
         # "会什么/能做什么"这类短短语收进"你(会|能)"锚定的正则模板（_CAPABILITY_RES），
         # 不再裸子串匹配，避免"设置里会不会什么字样"这类知识问法被误拦。
+        # 同一理由摘掉"能提供什么/有什么功能/能回答什么/有什么作用"四条**无主语锚**的裸条目：
+        # 它们与省略宾语的属性追问同形（"（这台设备）有什么功能介绍吗"），而 L1 命中是
+        # **零降级路径**——不经任何模型、没有"拿不准就放行"的余地，新句子撞进来就是必然误拦
+        # （线上实测：这句被回了能力介绍的固定话术）。带"你"的合法打探由 _CAPABILITY_RES 原样接住。
         "你能做什么", "你能干什么", "你能帮我做什么", "你能帮我干嘛", "你会些什么",
-        "能提供什么", "有什么功能", "能回答什么", "有什么作用", "你都能帮到我",
+        "你都能帮到我",
     )),
     ("greeting", (
         "你好", "您好", "哈喽", "嗨", "hello", "hi", "在吗", "早上好", "晚上好", "下午好",
@@ -184,7 +190,7 @@ _MATCH_ORDER: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _CAPABILITY_RES = (
     re.compile(r"(你|您)(都)?(会|能|可以|有的?)做?(些什么|什么|啥|哪几?些)"),
-    re.compile(r"(你|您)(都)?(能|可以|会)(帮)?我?(们)?(干|做|回答|解决|查|讲)(什么|啥)"),
+    re.compile(r"(你|您)(都)?(能|可以|会)(帮)?我?(们)?(干|做|回答|解决|查|讲|提供)(什么|啥)"),
     re.compile(r"(你|您)有什么(功能|作用|能力)"),
 )
 
@@ -274,29 +280,35 @@ def reply_for(subtype: object) -> str:
     return random.choice(candidates) if candidates else ""
 
 
-def detect_chitchat(text: object, *, l1_only: bool = False) -> str | None:
+def detect_chitchat(text: object, *, l1_only: bool = False, history_text: str = "") -> str | None:
     """返回命中的闲聊子类型；含产品/型号信号、非短句或未在白名单内时一律返回 None（放行检索）。
 
     l1_only=True 时只跑规则（供调用方单独验证规则面）；默认规则未命中且输入
     "短且无实体信号"时触发 LLM 兜底分类。节点链路为了控制话术与 intent 的组装顺序，
     直接调用 classify_chitchat_llm 拿完整结果，不走这里的单返回值。
     """
-    return detect_chitchat_with_reply(text, l1_only=l1_only)[0]
+    return detect_chitchat_with_reply(text, l1_only=l1_only, history_text=history_text)[0]
 
 
-def detect_chitchat_with_reply(text: object, *, l1_only: bool = False) -> tuple[str | None, str]:
-    """(子类型, 话术) 一体返回：规则命中用静态表，LLM 兜底命中优先用模型顺带生成的回复。"""
+def detect_chitchat_with_reply(
+    text: object, *, l1_only: bool = False, history_text: str = ""
+) -> tuple[str | None, str]:
+    """(子类型, 话术) 一体返回：无论规则命中还是 LLM 兜底命中，话术**一律**取自静态表。
+
+    history_text 只对 L2 有意义：省略宾语的追问孤立看就是"让助手自我介绍"，必须带上文
+    （见 classify_chitchat_llm）。曾经这里会把 other 子类型的模型生成 reply 当作话术返回，
+    那个口子已按 M9 封掉：它绕过无证据守卫，模型问什么都能"答"出来。
+    """
     subtype = _detect_by_rules(text)
     if subtype is not None:
         return subtype, reply_for(subtype)
     if l1_only or not should_ask_llm(text):
         return None, ""
-    llm_subtype, reply = classify_chitchat_llm(str(text or ""))
+    llm_subtype, llm_reply = classify_chitchat_llm(str(text or ""), history_text)
     if llm_subtype is None:
         return None, ""
-    if llm_subtype == "other":
-        # 模型生成空回复时退到 other 静态话术，避免回给用户空字符串。
-        return llm_subtype, reply or reply_for("other")
+    if llm_reply:
+        logger.info("闲聊兜底分类附带生成（仅留存不采纳，子类型=%s）：%s", llm_subtype, llm_reply[:80])
     return llm_subtype, reply_for(llm_subtype)
 
 
@@ -345,11 +357,18 @@ def within_llm_gate_len(text: object, max_len: int) -> bool:
     return bool(normalized) and len(normalized) <= max_len
 
 
-def classify_chitchat_llm(text: str) -> tuple[str | None, str]:
-    """LLM 兜底分类：返回 (闲聊子类型或 None, 可选的个性化话术)。
+def classify_chitchat_llm(text: str, history_text: str = "") -> tuple[str | None, str]:
+    """LLM 兜底分类：返回 (闲聊子类型或 None, 模型给的 reply)。
+
+    history_text 是带角色标注的最近几轮对话（**含助手回答**）。省略宾语的追问本轮不沾任何
+    产品词，只看当前句会被判成"让助手自我介绍"（线上实测），必须给它上文。
+
+    返回的 reply **只作日志留存，调用方不得直接采纳**：other 类曾经拿它当答案，等于开了一个
+    零检索、零来源、还绕过 R5 无证据守卫的自由生成入口（实测「背一下静夜思」真的背了诗），
+    用药剂量/价格/默认密码一类问法同样会被凭空作答。话术一律走 reply_for()。
 
     任何异常/超时都判为"非闲聊"放行检索（宁查勿否）；未知子类型统一归一到 other，
-    保证话术查找不落入无 key 的空白。话术只认模型明确给出的 reply，否则由调用方用静态表。
+    保证话术查找不落入无 key 的空白。
     """
     try:
         # 惰性导入：与实体抽取同款，把 langchain/模型配置的重量级依赖留给真正需要调模型的分支。
@@ -368,7 +387,7 @@ def classify_chitchat_llm(text: str) -> tuple[str | None, str]:
         )
         response = client.invoke([
             ("system", INTENT_CLASSIFY_SYSTEM),
-            ("user", build_intent_classify_prompt(str(text or ""))),
+            ("user", build_intent_classify_prompt(str(text or ""), history_text)),
         ])
         verdict = _parse_intent_verdict(getattr(response, "content", response))
     except Exception as exc:  # noqa: BLE001 - 兜住网络/超时/解析等一切异常，放行检索
@@ -378,9 +397,9 @@ def classify_chitchat_llm(text: str) -> tuple[str | None, str]:
         return None, ""
     subtype, reply = verdict
     if subtype not in _KNOWN_SUBTYPES:
-        # 白名单内的子类型用静态话术表（reply_for 随机取一条）；表外子类型归入 other
-        # （由 LLM 生成的 reply 应答，生成缺失时由调用方回退 other 静态兜底），
-        # 保证不会在话术表里查不到 key。
+        # 白名单内的子类型用静态话术表（reply_for 随机取一条）；表外子类型归入 other，
+        # 它的 reply 同样**不采纳**、统一走 reply_for("other")（理由见函数 docstring：
+        # 采纳模型生成内容会开出无来源的自由回答入口），保证不会在话术表里查不到 key。
         subtype = "other"
     return subtype, reply
 
@@ -415,9 +434,9 @@ def _loads_json_object(content: object) -> object:
         return None
 
 
-def chitchat_reply(text: object) -> str | None:
-    """若判定为闲聊则返回话术（候选内随机，或 LLM 顺带生成的个性化回复），否则 None。"""
-    subtype, reply = detect_chitchat_with_reply(text)
+def chitchat_reply(text: object, history_text: str = "") -> str | None:
+    """若判定为闲聊则返回话术（候选内随机），否则 None。话术永远来自静态表，不采纳模型生成内容。"""
+    subtype, reply = detect_chitchat_with_reply(text, history_text=history_text)
     if subtype is None:
         return None
     return reply

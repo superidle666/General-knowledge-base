@@ -1,9 +1,9 @@
 """
 重排序模型配置。
 
-@FilePath: config/reranker_config.py
-@Date: 2026-09-07
-@Description: 加载文本重排序服务的模型、指令和访问配置。
+config/reranker_config.py
+
+加载文本重排序服务的模型、指令和访问配置。
 """
 
 from dataclasses import dataclass

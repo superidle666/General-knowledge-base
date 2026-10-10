@@ -40,7 +40,8 @@ def test_build_state_seeds_confirmed_manual_entity() -> None:
         entity_result={"confirmed": True, "manual_name": "A 机型", "candidates": ["A 机型", "B 机型"], "maybe_series": True},
     )
     document = SimpleNamespace(id=9, version=1, title="多机型对比", storage_key="storage/uploads/x.pdf")
-    library = SimpleNamespace(id=3, entity_recognition_mode="required")
+    # name 不能缺：_build_state 会算 _processed_dir(library)=f"{id}-{slugify(name)}"
+    library = SimpleNamespace(id=3, name="工业设备手册", entity_recognition_mode="required")
 
     state = ImportWorker._build_state(task, document, library)
     assert state["item_name"] == "A 机型"
@@ -54,7 +55,7 @@ def test_build_state_without_confirmation_does_not_seed_entity() -> None:
     """未确认（首次导入或 entity_result 为空）时不预置实体，节点走正常枚举。"""
     task = SimpleNamespace(id=5, config_snapshot={}, entity_result=None)
     document = SimpleNamespace(id=9, version=1, title="普通文档", storage_key="storage/uploads/y.pdf")
-    library = SimpleNamespace(id=3, entity_recognition_mode="required")
+    library = SimpleNamespace(id=3, name="工业设备手册", entity_recognition_mode="required")
 
     state = ImportWorker._build_state(task, document, library)
     assert "item_name" not in state

@@ -30,6 +30,31 @@ from utils.runtime_settings import get_runtime_setting
 # SDK 默认重试 2 次未变，因而不健康模型下单张图最坏约 3 × 60 秒。
 VL_REQUEST_TIMEOUT_SECONDS = 60.0
 
+# 多模态模型爱把摘要包在 ```markdown 代码围栏里（线上实测：条形码那张的 alt 写成了
+# "```markdownHAK 180 …封面条形码（…）```"）。alt 会原样进切片正文、并被答案逐字引用，
+# 围栏字会跟着污染正文。只剥**边界**上的围栏标记，不删文本中间的三个反引号。
+# 三条规则分开写是有原因的：“围栏行”可以整行丢掉（那行除了 ``` 与语言标识没有正文），
+# 而围栏与摘要黏成一行的写法（```markdown摘要）只能吃下 ``` 加**已知**语言标识；
+# 拿字符类去匹“任意标识”会把摘要开头的型号串（"markdownHAK180"）一起吞掉。
+_FENCE_LINE_RE = re.compile(r"^`{3,}[ \t]*[A-Za-z0-9_+-]*[ \t]*\n")
+_FENCE_HEAD_RE = re.compile(r"^`{3,}[ \t]*(?:markdown|md|text|txt|plain|json|html)?", re.IGNORECASE)
+_FENCE_TAIL_RE = re.compile(r"[ \t]*`{3,}[ \t]*$")
+
+
+def clean_image_caption(raw: object) -> str:
+    """把多模态返回整理成一句可用的图片 alt：剥代码围栏 + 折成单行。"""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    text = _FENCE_LINE_RE.sub("", text, count=1)
+    if text.startswith("```"):
+        # 没有换行可依托时（围栏与摘要黏在一行），只吃已知语言标识：宁可留着标识字样，也不能吞正文
+        text = _FENCE_HEAD_RE.sub("", text, count=1)
+    text = _FENCE_TAIL_RE.sub("", text.rstrip(), count=1)
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    # 与原行为一致：alt 必须是单行（带换行会破坏 ![alt](url) 语法），折行不补空格
+    return "".join(lines)
+
 
 class NodeMDImg(BaseNode):
     """
@@ -305,7 +330,8 @@ class NodeMDImg(BaseNode):
                 }
             ]
             response = chat_model.invoke(messages)
-            return response.content.strip().replace("\n", "")
+            # 不直接用 response.content：模型会把摘要包在代码围栏里，alt 只该有一句纯文本
+            return clean_image_caption(response.content)
 
         except Exception as e:
             self.logger.error(f"图像总结失败：{image_path}, 错误{e}")

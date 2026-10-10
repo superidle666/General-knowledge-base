@@ -392,6 +392,10 @@ class QuerySourceOut(BaseModel):
     source: str = "local"
     url: str | None = None
     site_name: str | None = None
+    # 精排阶段把同一章节的过切碎片合并成一条时，模型读到的是 N 段拼接正文，而来源仍只占
+    # 1 条（守住“读几条 = 展示几条 = top_k”）。这里给出可溯源的段数，>=2 才非空；
+    # 旧会话历史没这个字段，缺省不显示。
+    merged_parts: int | None = None
 
 
 class QueryLibraryOut(BaseModel):

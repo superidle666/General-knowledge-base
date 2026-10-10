@@ -59,7 +59,7 @@ def node(monkeypatch):
     """
     prepared = NodePrepareQuery()
     monkeypatch.setattr(prepared, "_call_entity_llm", lambda text, history_text: [])
-    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text: (None, ""))
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text, history_text="": (None, ""))
     return prepared
 
 

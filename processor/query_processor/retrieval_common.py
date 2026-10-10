@@ -1,9 +1,8 @@
 """本地检索与 HyDE 检索共用的 Milvus 检索工具。
 
-@FilePath: processor/query_processor/retrieval_common.py
-@Date: 2026-09-21
-@Description: 收敛多路向量检索共用的输出字段白名单、集合结构探测、过滤表达式构造与结果归一化。
-@BusinessRule: 同一知识库的多路检索必须使用同一套字段和同一套库隔离条件，否则某一路召回的结果
+processor/query_processor/retrieval_common.py
+收敛多路向量检索共用的输出字段白名单、集合结构探测、过滤表达式构造与结果归一化。
+同一知识库的多路检索必须使用同一套字段和同一套库隔离条件，否则某一路召回的结果
                会因为缺少定位字段而无法回填成用户可见的来源。
 """
 

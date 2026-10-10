@@ -1,8 +1,9 @@
-"""解析目录按 task 隔离（批次二 P1-2）。
+"""解析目录按知识库分层（批次二 P1-2 的演进）。
 
-此前所有导入任务把 MinerU 的 zip 与解压产物直接平铺在 storage/processed 根下：中间产物
-没有归属，想按任务清理都不知道该删哪些。改为 storage/processed/{task_id} 后，一次导入
-一个工作目录，重试时整体重置自己的目录也碰不到别的任务。
+此前把 MinerU 产物平铺在 storage/processed 根下、中间产物没有归属。现改为
+storage/processed/{库ID}-{库名slug}：顶层按库可读归属；“每个上传文件一个独立文件夹”
+则由 node_pdf_to_md 用自带 uuid 的 pdf_stem 建子目录实现，重试时只重置自己的子目录。
+产物在导入成功后不再删除，供排查图片描述/切片质量。
 """
 
 import io
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import processor.import_processor.nodes.node_pdf_to_md as pdf_node_module
+from backend.app.core.path_utils import slugify
 from processor.import_processor.nodes.node_pdf_to_md import NodePDFToMD
 from processor.import_processor.worker import ImportWorker
 
@@ -34,41 +36,36 @@ def make_document() -> SimpleNamespace:
     )
 
 
-LIBRARY = SimpleNamespace(id=4, entity_recognition_mode="disabled")
+LIBRARY = SimpleNamespace(id=4, name="测试库", entity_recognition_mode="disabled")
 
 
 def build_state(task_id: int) -> dict:
     return ImportWorker._build_state(make_task(task_id), make_document(), LIBRARY)
 
 
-def test_file_dir_is_a_task_scoped_subdir() -> None:
-    """file_dir 必须落到 storage/processed/{task_id}，而不是共用的上一层。"""
+def test_file_dir_is_library_scoped_and_named() -> None:
+    """file_dir 必须落到 storage/processed/{库ID}-{库名slug}，且是绝对路径。"""
     state = build_state(1024)
     file_dir = Path(state["file_dir"])
 
-    assert file_dir.name == "1024"
+    assert file_dir.name == f"4-{slugify(LIBRARY.name)}"
     assert file_dir.parent.name == "processed"
     assert file_dir.is_absolute()
 
 
-def test_different_tasks_get_different_dirs() -> None:
-    assert build_state(11)["file_dir"] != build_state(12)["file_dir"]
+def test_file_dir_is_independent_of_task_id() -> None:
+    """同库同文档：不同 task_id 也共用同一库级目录（按文件隔离交给 pdf_stem 子目录）。"""
+    assert build_state(11)["file_dir"] == build_state(12)["file_dir"]
 
 
-def test_same_task_reuses_its_own_dir() -> None:
-    """重试用同一行 ImportTask：目录不变，节点内的 rmtree 才能整体重置自己。"""
-    assert build_state(7)["file_dir"] == build_state(7)["file_dir"]
+def test_library_name_traversal_is_sanitized() -> None:
+    """库名里混入路径分隔符也必须被 slugify 清洗掉，file_dir 只能待在 processed 之下。"""
+    hostile = SimpleNamespace(id=4, name="../../outside/..", entity_recognition_mode="disabled")
+    state = ImportWorker._build_state(make_task(1), make_document(), hostile)
+    file_dir = Path(state["file_dir"])
 
-
-@pytest.mark.parametrize("raw_task_id", ["42", 42.0])
-def test_task_id_is_normalized_to_int(raw_task_id: object) -> None:
-    assert Path(build_state(raw_task_id)["file_dir"]).name == "42"  # type: ignore[arg-type]
-
-
-def test_path_traversal_in_task_id_is_rejected() -> None:
-    """task_id 只接受整数：拼路径前必须先归一，不能让外部输入走到别的目录。"""
-    with pytest.raises((TypeError, ValueError)):
-        build_state("7/../../outside")  # type: ignore[arg-type]
+    assert file_dir.parent.name == "processed"
+    assert ".." not in file_dir.name and "/" not in file_dir.name and "\\" not in file_dir.name
 
 
 class _FakeResponse:

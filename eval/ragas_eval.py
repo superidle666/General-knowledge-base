@@ -1,14 +1,12 @@
 """
 RAGAS 检索问答质量评估脚本。
 
-@FilePath: eval/ragas_eval.py
-@Date: 2026-09-26
-@Description:
-    读取 eval/qa.csv（question=问题，ground_truth=标准答案），逐题进程内直调
-    查询工作流（与 backend/app/api/query.py 同一入口、同一套状态参数，library_id=2
-    "网络设备资料"），拿到系统答案与生成时实际使用的检索上下文（reranked_docs）后，用 ragas 计算 5 项指标：
-    Faithfulness / Answer Relevancy / Context Precision / Context Recall /
-    Answer Correctness，结果写入 eval/qa_result.csv（UTF-8 with BOM）。
+eval/ragas_eval.py
+读取 eval/qa.csv（question=问题，ground_truth=标准答案），逐题进程内直调
+查询工作流（与 backend/app/api/query.py 同一入口、同一套状态参数，library_id=2
+"网络设备资料"），拿到系统答案与生成时实际使用的检索上下文（reranked_docs）后，用 ragas 计算 5 项指标：
+Faithfulness / Answer Relevancy / Context Precision / Context Recall /
+Answer Correctness，结果写入 eval/qa_result.csv（UTF-8 with BOM）。
 
 用法（必须使用项目虚拟环境解释器，且在工作区根目录下运行）：
     .venv\\Scripts\\python.exe eval\\ragas_eval.py

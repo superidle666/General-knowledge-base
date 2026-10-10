@@ -30,6 +30,7 @@ from backend.app.api.schemas import (
 )
 from backend.app.core.audit import log_operation
 from backend.app.core.auth import AuthenticatedUser, get_current_user, hash_password, require_management_access
+from backend.app.core.path_utils import slugify
 from backend.app.core.permissions import REGISTERED_PERMISSION_CODES, is_registered_permission
 from backend.app.db.models import (
     Document, DocumentChunk, DocumentTag, Entity, ImportTask, Library, LibraryMember, OperationLog,
@@ -37,8 +38,10 @@ from backend.app.db.models import (
 )
 from backend.app.db.session import get_db
 from config.milvus_config import milvus_config
+from config.minio_config import minio_config
 from utils.import_queue import enqueue_import_task, request_import_cancellation
 from utils.milvus_utils import get_milvus_client
+from utils.minio_utils import get_minio_client
 from utils.mongo_history_utils import get_history_mongo_tool
 
 router = APIRouter(prefix="/api/v1", tags=["mysql"], dependencies=[Depends(require_management_access)])
@@ -772,7 +775,8 @@ async def upload_document(
     )
     if duplicate is not None:
         raise HTTPException(409, "本次上传包含知识库内已存在的文件")
-    directory = Path("storage") / "uploads" / str(library_id)
+    # 目录名 = 库ID-库名slug：保留 ID 前缀防同名冲突/改名后不致散落多目录，追加 slug 便于肉眼辨认。
+    directory = Path("storage") / "uploads" / f"{library.id}-{slugify(library.name)}"
     directory.mkdir(parents=True, exist_ok=True)
     uploaded_documents: list[DocumentUploadOut] = []
     config_snapshot = import_config_snapshot(library)
@@ -781,7 +785,9 @@ async def upload_document(
         # 此前 uuid 前置会让 storage/processed 的解析目录和 MinIO 图片目录以一串
         # 无意义字符开头；全链路只通过 storage_key 定位文件，不解析文件名，改动安全。
         original = Path(filename)
-        stored = directory / f"{original.stem}_{uuid4().hex}{original.suffix}"
+        # uuid 只取 8 位（32 位）：库内文件量级下碰撞概率可忽略，且 DB 层还有 file_hash 去重；
+        # 文件名 stem 前置，便于直接扫描辨认是哪份文档。
+        stored = directory / f"{original.stem}_{uuid4().hex[:8]}{original.suffix}"
         stored.write_bytes(raw)
         document = Document(library_id=library_id, title=Path(filename).stem or filename, original_filename=filename, storage_key=stored.as_posix(), mime_type=file.content_type, file_size=len(raw), file_hash=file_hash, uploaded_by=current_user.id)
         session.add(document)
@@ -992,6 +998,42 @@ def delete_document_vectors(knowledge_base_id: int, document_id: int, *, milvus_
     )
 
 
+def _cleanup_document_files(document: Document) -> None:
+    """文档删除后清理其在本地与 MinIO 的落地文件。
+
+    软删的 DB 记录保留用于审计/恢复，但源文件与图片已不再被任何链路引用（重新处理需先取消
+    删除并会走全新上传）。所有删除都做幂等保护，任一步失败只记日志、不影响已提交的删除结果。
+    注意：绝不能删 library 级目录——知识库是软删可恢复的。
+    """
+    logger = logging.getLogger(__name__)
+    # storage_key 是相对仓库根的路径，与上传/重新处理同一约定（API 进程 CWD=仓库根）。
+    source_path = Path(document.storage_key)
+    try:
+        if source_path.is_file():
+            source_path.unlink(missing_ok=True)
+        # 同目录下以本文件为源写出的切分调试备份（无人读取）
+        if source_path.parent.is_dir():
+            for stale in source_path.parent.glob(f"chunks-kb-*-doc-{document.id}-v-*.json"):
+                stale.unlink(missing_ok=True)
+    except OSError as error:
+        logger.warning("文档本地文件清理失败（不影响删除结果）: document_id=%s error=%s", document.id, error)
+
+    # MinIO 图片目录（node_md_img 按 doc_stem 隔离）
+    try:
+        minio_client = get_minio_client()
+        if minio_client is not None:
+            from minio.deleteobjects import DeleteObject
+            doc_stem = Path(document.original_filename).stem
+            prefix = f"{minio_config.img_dir}/{doc_stem}".replace(" ", "")
+            objects = minio_client.list_objects(minio_config.bucket_name, prefix=prefix, recursive=True)
+            delete_list = [DeleteObject(obj.object_name) for obj in objects]
+            if delete_list:
+                for err in minio_client.remove_objects(minio_config.bucket_name, delete_list):
+                    logger.warning("MinIO 图片删除失败: %s", err)
+    except Exception as error:  # noqa: BLE001 - MinIO 不可达不应阻断删除
+        logger.warning("文档 MinIO 图片清理失败（不影响删除结果）: document_id=%s error=%s", document.id, error)
+
+
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_document(document_id: int, session: AsyncSession = Depends(get_db), current_user: AuthenticatedUser = Depends(get_current_user)):
     """删除文档及其检索数据。
@@ -1031,6 +1073,8 @@ async def delete_document(document_id: int, session: AsyncSession = Depends(get_
     document.status = "deleted"
     await log(session, "delete", "document", document.id)
     await commit(session, "删除文档失败")
+    # DB/向量已提交，收尾清理磁盘与对象存储；失败只记日志，不回滚已完成的删除。
+    _cleanup_document_files(document)
 
 
 @router.get("/documents/{document_id}/chunks", response_model=list[ChunkOut])

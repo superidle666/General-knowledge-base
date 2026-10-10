@@ -146,3 +146,55 @@ def test_reused_client_is_used_on_the_real_call_path(tmp_path: Path) -> None:
         node._summarize_image(image_path, root_folder="doc", image_content=context)
 
     assert len(RecordingChatModel.instances) == 1
+
+
+# --------------------------------------------------------------------------
+# alt 卫生：多模态返回常被包在 ```markdown 代码围栏里
+# （围栏字会跟着 alt 进切片正文，并被答案逐字引用出来）
+# --------------------------------------------------------------------------
+
+BARCODE_CAPTION = "HAK 180 烫金机产品安全手册封面条形码（含型号 D01WD7001-00 及 SCHN 标识）"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (f"```markdown\n{BARCODE_CAPTION}\n```", BARCODE_CAPTION),
+        # 线上实测那份 alt：围栏与摘要黏在同一行（旧代码先 replace("\n", "") 才粘上的）
+        (f"```markdown{BARCODE_CAPTION}```", BARCODE_CAPTION),
+        (f"```\n{BARCODE_CAPTION}\n```", BARCODE_CAPTION),
+        (f"```python\n{BARCODE_CAPTION}\n```", BARCODE_CAPTION),
+        (f"{BARCODE_CAPTION}\n另起一行", f"{BARCODE_CAPTION}另起一行"),  # alt 必须单行
+        (BARCODE_CAPTION, BARCODE_CAPTION),  # 干净返回原样通过
+        (f"  {BARCODE_CAPTION}  ", BARCODE_CAPTION),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_code_fence_never_reaches_the_image_alt(raw: object, expected: str) -> None:
+    assert node_md_img.clean_image_caption(raw) == expected
+
+
+def test_a_caption_starting_with_a_model_token_is_not_eaten_with_the_fence() -> None:
+    """`markdown` 与 `HAK180` 之间没空格时只能吃已知语言标识：吃"任意 token"会连型号一起丢。"""
+    assert node_md_img.clean_image_caption("```markdownHAK180 烫金机外观图```") == "HAK180 烫金机外观图"
+
+
+def test_the_fence_is_stripped_on_the_real_summary_call_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接线守卫：清洗必须发生在摘要调用链上，而不是只多出一个没人调的函数。"""
+    class FencedChatModel(RecordingChatModel):
+        def invoke(self, messages: Any) -> Any:
+            class _Response:
+                content = f"```markdown\n{BARCODE_CAPTION}\n```"
+
+            return _Response()
+
+    monkeypatch.setattr(node_md_img, "ChatOpenAI", FencedChatModel)
+    _, image_path, context = _images(tmp_path)[0]
+
+    summary = NodeMDImg()._summarize_image(image_path, root_folder="doc", image_content=context)
+
+    assert summary == BARCODE_CAPTION
+    assert "```" not in summary

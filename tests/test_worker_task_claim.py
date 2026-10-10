@@ -73,7 +73,7 @@ def document_row() -> Row:
 
 
 def library_row() -> Row:
-    return Row(id=LIBRARY_ID, entity_recognition_mode="disabled")
+    return Row(id=LIBRARY_ID, name="手机库", entity_recognition_mode="disabled")
 
 
 class _Tx:
@@ -249,7 +249,8 @@ async def test_claim_builds_graph_state() -> None:
     assert state["task_id"] == str(TASK_ID)
     assert state["document_id"] == DOCUMENT_ID
     assert state["knowledge_base_id"] == LIBRARY_ID
-    assert state["file_dir"].replace("\\", "/").endswith(f"storage/processed/{TASK_ID}")
+    # file_dir 按知识库分层：storage/processed/{库ID}-{库名slug}（不再是 task 级）
+    assert state["file_dir"].replace("\\", "/").endswith(f"storage/processed/{LIBRARY_ID}-手机库")
 
 
 # --------------------------------------------------------------------------

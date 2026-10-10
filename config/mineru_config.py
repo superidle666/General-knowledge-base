@@ -1,9 +1,9 @@
 """
 MinerU 文档解析服务配置。
 
-@FilePath: config/mineru_config.py
-@Date: 2026-09-07
-@Description: 加载 PDF 转 Markdown 服务的地址和访问令牌。
+config/mineru_config.py
+
+加载 PDF 转 Markdown 服务的地址和访问令牌。
 """
 
 import os

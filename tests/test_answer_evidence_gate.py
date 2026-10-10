@@ -191,7 +191,7 @@ def _prepare_state(query: str, **overrides) -> dict:
 def prepare_node(monkeypatch):
     prepared = NodePrepareQuery()
     monkeypatch.setattr(prepared, "_call_entity_llm", lambda text, history_text: [])
-    monkeypatch.setattr(prepare_module, "classify_chitchat_llm", lambda text: (None, ""))
+    monkeypatch.setattr(prepare_module, "classify_chitchat_llm", lambda text, history_text="": (None, ""))
     return prepared
 
 

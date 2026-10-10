@@ -1,9 +1,9 @@
 """
 Embedding 模型配置。
 
-@FilePath: config/embedding_config.py
-@Date: 2026-09-07
-@Description: 加载 BGE-M3 模型路径、设备和精度等向量化配置。
+config/embedding_config.py
+
+加载 BGE-M3 模型路径、设备和精度等向量化配置。
 """
 from dataclasses import dataclass
 import os

@@ -24,6 +24,7 @@ from processor.query_processor.chitchat_gate import contains_entity_signal, dete
 from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
 from utils import entity_patterns
 from utils.entity_patterns import (
+    BRAND_GROUPS,
     BRAND_TERMS,
     CATEGORY_TERMS,
     ENTITY_SIGNAL_TERMS,
@@ -31,7 +32,10 @@ from utils.entity_patterns import (
     MODEL_CODE_PATTERN,
     PRODUCT_MENTION_PATTERN,
     SPEC_TERMS,
+    brand_group_of,
+    brand_groups_in_mentions,
     find_shape_mentions,
+    has_identity_token,
     is_specific_model_code,
     looks_like_model,
 )
@@ -42,6 +46,7 @@ CHITCHAT_PATH = PROJECT_ROOT / "processor" / "query_processor" / "chitchat_gate.
 ENTITY_NODE_PATH = (
     PROJECT_ROOT / "processor" / "import_processor" / "nodes" / "node_entity_recognition_required.py"
 )
+TOPIC_GUARD_PATH = PROJECT_ROOT / "processor" / "query_processor" / "topic_consistency.py"
 
 # 型号形状的"指纹"：自己重写一份型号正则必然要枚举字母/数字字符类（[A-Z0-9]、[A-Za-z] 等）。
 # 只查"[A-Za-z" 会被 `[A-Z][A-Z0-9]` 这种写法绕过去，所以三个字母区间开头都算。
@@ -238,12 +243,17 @@ def test_old_local_constants_are_gone() -> None:
 def test_shape_extraction_is_reused_instead_of_duplicated() -> None:
     """所有“扫形状抽实体”的地方都只能调同一个公共函数；调用点数变了就得逐个核实。
 
-    现行三处：① `_extract_mentions` 的正则通道；② `_rewrite_query_with_history` 从历史借型号；
-    ③ `_inventory_gate` 的反护栏（R16：本轮提到了任何实体形状就不当清单问题拒）。
+    现行五处：① `_extract_mentions` 的正则通道；② `_rewrite_query_with_history` 从历史借型号；
+    ③ `_inventory_gate` 的反护栏（R16：本轮提到了任何实体形状就不当清单问题拒）；
+    ④ `_backfill_ellipsis_anchor` 的前置闸①（检索词里已有实体就不叠加话题锚）；
+    ⑤ `_topic_entity_from_history` 从【用户】历史里取话题锚（M4）。
+    ④⑤ 都是“同一段文本换个用途”，口径必须与抽取/拒答那两路一致，所以同样走公共函数——
+    required 库还多一层词表优先（`_vocab_entities_in`），那是正则抽不到的纯中文实体名的补充，
+    不是另写一套形状。
     坚持等于而不是“至少”：新增调用点必须说明它复用的是同一口径，而不是在别处又写了一套正则
     （自写一套正则由上一条“文件不得自带型号正则”的守卫兜住）。
     """
-    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 3
+    assert _call_names(PREPARE_QUERY_PATH).count("find_shape_mentions") == 5
 
 
 # --------------------------------------------------------------------------
@@ -310,3 +320,71 @@ def test_patterns_module_compiles_without_side_effects() -> None:
         if isinstance(node, ast.ImportFrom)
     }
     assert imported <= {"re", "__future__"}, f"公共常量模块不该依赖运行时组件：{imported}"
+
+
+# --------------------------------------------------------------------------
+# 六、品牌组判定（R7）：只说到品牌时能不能对上本库那一款
+# --------------------------------------------------------------------------
+
+def test_brand_terms_flatten_from_a_single_group_table() -> None:
+    """BRAND_TERMS 只能由品牌组摊平而来：两处各存一份，加品牌就必然漏一处。"""
+    assert BRAND_TERMS == tuple(term for _, terms in BRAND_GROUPS for term in terms)
+    assert len({label for label, _ in BRAND_GROUPS}) == len(BRAND_GROUPS), "组名重复会让日志分不清"
+    for label, terms in BRAND_GROUPS:
+        assert terms, f"品牌组 {label} 是空的"
+        # 拉丁词条必须小写无标点：消费方在"去标点 + 转小写"后的文本上做子串匹配
+        for term in terms:
+            assert term == term.strip().casefold(), f"{label} 的词条 {term!r} 未归一"
+
+
+@pytest.mark.parametrize(
+    ("text", "group"),
+    [
+        ("苹果手机", "苹果"),
+        ("苹果", "苹果"),
+        ("iPhone 18 Pro", "苹果"),  # 规范名里没有"苹果"二字，全靠机型词进组
+        ("iPad Air", "苹果"),
+        ("HUAWEI 平板", "华为"),
+        ("Redmi K80", "小米"),
+        ("红米手机", "小米"),
+        ("一加 Ace 6T", "一加"),
+        ("HAK-180", ""),
+        ("烫金机", ""),
+        ("", ""),
+        (None, ""),
+    ],
+)
+def test_brand_group_of_covers_the_model_family_names(text: object, group: str) -> None:
+    assert brand_group_of(text) == group
+
+
+def test_has_identity_token_is_a_shape_rule_not_a_vocabulary_lookup() -> None:
+    """带数字才算"点到具体型号"：这条判据同时被 M6（要不要比正文）与 R7（要不要收窄）使用。"""
+    assert has_identity_token("iPhone 18 Pro") is True
+    assert has_identity_token("HAK180") is True
+    assert has_identity_token("APL-005") is True
+    assert has_identity_token("苹果手机") is False
+    assert has_identity_token("烫金机") is False
+    assert has_identity_token(None) is False
+
+
+def test_brand_groups_in_mentions_dedups_and_keeps_first_order() -> None:
+    assert brand_groups_in_mentions(["苹果手机", "苹果平板"]) == ["苹果"]
+    assert brand_groups_in_mentions(["华为平板", "苹果手机"]) == ["华为", "苹果"]
+    assert brand_groups_in_mentions(["烫金机怎么调温", ""]) == []
+
+
+def test_a_numbered_mention_blocks_the_whole_brand_group() -> None:
+    """用户点名了 iPhone 17 时整体不返回：本库只有 18，收窄就等于替用户换了型号。"""
+    assert brand_groups_in_mentions(["苹果手机", "iPhone 17"]) == []
+    assert brand_groups_in_mentions(["iPhone 17"]) == []
+
+
+def test_topic_guard_reuses_the_shared_identity_rule() -> None:
+    """M6 那份"带不带型号身份"的判据必须来自公共模块，不能各留一份（P2-8 同一条红线）。"""
+    assert "has_identity_token" in imported_names(TOPIC_GUARD_PATH, "entity_patterns")
+    tree = ast.parse(TOPIC_GUARD_PATH.read_text(encoding="utf-8"))
+    defined = {
+        node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "_has_identity_token" not in defined, "话题校验里又定义了一份同形判据"

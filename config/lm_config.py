@@ -1,9 +1,9 @@
 """
 大语言模型配置。
 
-@FilePath: config/lm_config.py
-@Date: 2026-09-07
-@Description: 加载答案生成、视觉理解和实体识别所需的模型配置。
+config/lm_config.py
+
+加载答案生成、视觉理解和实体识别所需的模型配置。
 """
 
 from dataclasses import dataclass

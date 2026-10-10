@@ -18,6 +18,13 @@ defineEmits<{ (event: 'close'): void }>()
 const webSources = computed(() => props.sources.filter((source) => source.kind === 'web'))
 const webSourceCount = computed(() => webSources.value.length)
 
+// 合并来源只占 1 条名额，但模型读到的是同一章节被过切后的多段拼接正文；徽标把这两个事实分开说清。
+const mergedBadgeTitle = '本条来源由同一章节被切分后的多段合并而成（展示的为当前可溯源的段数）'
+
+function mergedCountOf(source: UserSource) {
+  return source.mergedParts && source.mergedParts > 1 ? source.mergedParts : 0
+}
+
 const detailVisible = ref(false)
 const selectedSource = ref<UserSource | null>(null)
 
@@ -55,6 +62,8 @@ function renderMarkdown(content: string) {
           <span class="score" title="检索相关性：该来源与问题文本的匹配度（相对本次查询），不代表答案正确概率">{{
             source.relevanceLabel
           }}</span
+          ><span v-if="mergedCountOf(source)" class="merged-badge" :title="mergedBadgeTitle"
+            >含 {{ mergedCountOf(source) }} 段</span
           ><span class="source-kind" :class="source.kind === 'web' ? 'is-web' : 'is-local'">{{
             source.kind === 'web' ? '联网' : '知识库'
           }}</span>
@@ -139,6 +148,9 @@ function renderMarkdown(content: string) {
         <div v-if="selectedSource.kind !== 'web'">
           <span>Chunk ID</span><strong>{{ selectedSource.chunkId ?? '未提供' }}</strong>
         </div>
+        <div v-if="mergedCountOf(selectedSource)">
+          <span>合并段落</span><strong>含 {{ mergedCountOf(selectedSource) }} 段（正文为拼接后的完整内容）</strong>
+        </div>
       </div>
       <div class="source-detail-content">
         <span>{{ selectedSource.kind === 'web' ? '搜索引擎返回的摘要（非页面全文）' : '完整 Chunk 内容' }}</span>
@@ -163,6 +175,15 @@ function renderMarkdown(content: string) {
 .source-kind.is-web {
   background: var(--accent-green-bg);
   color: var(--accent-green-deep);
+}
+.merged-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  line-height: 18px;
+  background: var(--accent-amber-bg);
+  color: var(--accent-amber);
 }
 .online-list {
   display: grid;

@@ -93,16 +93,21 @@ def literal_assignments(paths: list[Path], attribute: str, owners: set[str]) -> 
 
 
 def collection_literal(path: Path, variable: str) -> set[str]:
-    """读取模块级字面量集合：支持 `X = {...}`、`X = frozenset({...})`、`X = [...]`。"""
+    """读取模块级字面量集合：支持 `X = {...}`、`X = frozenset({...})`、`X = [...]` 与带类型标的写法。"""
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+            container: ast.expr | None = node.value
+        elif isinstance(node, ast.AnnAssign):
+            # 带类型标注的模块级常量（`X: tuple[str, ...] = (...)`）也是字面量集合：只认裸 Assign
+            # 会把这类常量报成“找不到”，而报错比静默放过好，但不能因此让守卫没法写。
+            targets = [node.target]
+            container = node.value
+        else:
             continue
-        matched = any(
-            isinstance(target, ast.Name) and target.id == variable for target in node.targets
-        )
-        if not matched:
+        matched = any(isinstance(target, ast.Name) and target.id == variable for target in targets)
+        if not matched or container is None:
             continue
-        container = node.value
         if isinstance(container, ast.Call) and container.args:
             container = container.args[0]
         if isinstance(container, ast.Dict):
@@ -117,6 +122,22 @@ def collection_literal(path: Path, variable: str) -> set[str]:
             if isinstance(element, ast.Constant) and isinstance(element.value, str)
         }
     raise AssertionError(f"{path.as_posix()} 中找不到模块级变量 {variable}，可能已被重构，请同步更新用例")
+
+
+def class_method_names(path: Path, class_name: str) -> set[str]:
+    """取类里直接定义的方法名（不含继承）。
+
+    “某个键只允许在一处写”这类守卫要先枚举出**其余全部**方法再逐个查写入，
+    漏一个方法就是漏一个写入点；方法改名时本函数抛错，不让守卫退化成空集恒真。
+    """
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return {
+                member.name
+                for member in node.body
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            }
+    raise AssertionError(f"{path.as_posix()} 中找不到类 {class_name}，请同步更新用例")
 
 
 def typed_dict_keys(path: Path, class_name: str) -> set[str]:

@@ -23,6 +23,7 @@ import pytest
 from graph_introspection import PROJECT_ROOT, typed_dict_keys
 
 from processor.query_processor.meta_instruction import (
+    _REGENERATION_TERMS,
     is_conversation_echo,
     is_regeneration_instruction,
 )
@@ -59,7 +60,7 @@ def _state(query: str, history=None, mode: str = "disabled", vocabulary=None) ->
 def node(monkeypatch):
     prepared = NodePrepareQuery()
     monkeypatch.setattr(prepared, "_call_entity_llm", lambda text, history_text: [])
-    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text: (None, ""))
+    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text, history_text="": (None, ""))
     return prepared
 
 
@@ -109,12 +110,21 @@ def test_questions_with_real_content_are_not_echo(query: str) -> None:
         "再次回答",
         "再说一遍",
         "继续",
+        "重新生成",
+        "再次生成",
         "精简点",
         "详细说说",
         "用表格列一下",
         "总结一下",
         "换种说法呢",
         "重新回答上面那个问题",
+        # M3（例 1 原句）："简单介绍"这一族与"（助手）自我介绍一下"同形，孤立看会被
+        # 闲聊闸 L2 判成寒暄；历史里有产品话题时它是改写型指令，本闸必须先接住。
+        "简单介绍",
+        "简单介绍一下",
+        "简单介绍一下吧",
+        "介绍一下",
+        "介绍下",
     ],
 )
 def test_regeneration_instructions_are_recognized(query: str) -> None:
@@ -128,11 +138,27 @@ def test_regeneration_instructions_are_recognized(query: str) -> None:
         "用表格列一下华为平板的参数",
         "继续说保修期多久",
         "精简一点讲温度怎么设置",
+        # M3 只收"整句就是这几个字"：带上自己主语的还是助手自我介绍，带实义内容的仍走检索
+        "介绍一下你自己",
+        "自我介绍一下",
+        "简单介绍下 HAK-180 的烫金温度",
+        "介绍一下华为平板",
     ],
 )
 def test_instructions_carrying_content_are_not_meta(query: str) -> None:
     """带真问题的句子检索词里本来就有内容，不该被本闸改写（漏判只是退回现状）。"""
     assert is_regeneration_instruction(query) is False
+
+
+def test_regeneration_terms_stay_individual_elements() -> None:
+    """存量缺陷回归：`"再次生成"` 漏了行尾逗号，Python 在集合字面量里会**隐式拼接**相邻两个
+    字符串常量（"再次生成" + "继续" → "再次生成继续"），两条同时失效且不报错，只有跑到
+    "继续" 时才发现它没被识别。每个元素必须带逗号，并按组各钉一条。"""
+    for expected in ("继续", "再次生成", "重新生成", "换个说法", "精简点", "用表格", "总结一下", "简单介绍"):
+        assert expected in _REGENERATION_TERMS, f"登记项被隐式拼接吞掉了：{expected!r}"
+    assert all(len(term) <= 8 for term in _REGENERATION_TERMS), (
+        f"出现过长的‘拼接项’：{[term for term in _REGENERATION_TERMS if len(term) > 8]}"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -196,6 +222,36 @@ def test_rewrite_swaps_retrieval_text_and_keeps_the_instruction(node) -> None:
     assert state["query_entity_text"] == "用表格列一下", "拒答判定仍吃本轮原文（与 R2 同口径）"
 
 
+def test_bare_intro_followup_is_routed_as_rewrite_not_chitchat(node, monkeypatch) -> None:
+    """漂移例 1 原句（«有烫金机吗» → «简单介绍一下» 被回了自我介绍）的固定出口。
+
+    本条的关键不是"小模型这次判得准"：M3 把它归改写型后，闲聊闸拿到的是**已经换掉的检索词**
+    （带实体信号、又长过门禁），既不会短路、也不必为它付一次意图分类调用——
+    正确性压在确定性的规则通道上，而不是分类器的临场发挥。"""
+    l2_calls: list[str] = []
+    monkeypatch.setattr(
+        node_module, "classify_chitchat_llm",
+        lambda text, history_text="": l2_calls.append(text) or ("self_intro", "我是知识库助手"),
+    )
+
+    state = node.process(_state("简单介绍一下", history=HISTORY))
+
+    assert state["intent"] == "meta_rewrite"
+    assert state["rewritten_query"] == PREV_QUESTION
+    assert state["meta_instruction"] == "简单介绍一下"
+    assert not state.get("answer"), "改写型不该短路，它要重新生成一版"
+    assert l2_calls == [], "检索词已被换成真问题，不该再花一次意图分类调用"
+
+
+def test_bare_intro_followup_without_history_is_left_alone(node) -> None:
+    """没有上一轮就无从改写：宁查勿否，退回现状（此时把它当自我介绍话术接住也是合理的）。"""
+    state = node.process(_state("简单介绍一下"))
+
+    assert state["rewritten_query"] == "简单介绍一下"
+    assert not state.get("meta_instruction")
+    assert state.get("intent") != "meta_rewrite"
+
+
 def test_rewrite_skips_previous_turns_that_cannot_be_answered(node) -> None:
     """上一轮若是清单句/指令句，拿它当检索词等于把同一个问题再问一遍；要往前找到能答的那条。"""
     history = [
@@ -232,7 +288,10 @@ def test_meta_gate_runs_before_the_chitchat_llm_gate(node, monkeypatch) -> None:
     """"继续""这种短句无实体信号，正好落在闲聊 L2 门禁里；若先过闲聊闸，元指令会被小模型
     判成闲聊并预置固定回复，用户要的"再来一版"就永远出不来。故元指令闸必须排在它之前。"""
     l2_calls: list[str] = []
-    monkeypatch.setattr(node_module, "classify_chitchat_llm", lambda text: l2_calls.append(text) or (None, ""))
+    monkeypatch.setattr(
+        node_module, "classify_chitchat_llm",
+        lambda text, history_text="": l2_calls.append(text) or (None, ""),
+    )
 
     state = node.process(_state("继续", history=HISTORY))
 

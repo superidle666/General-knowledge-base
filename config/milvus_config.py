@@ -1,9 +1,9 @@
 """
 Milvus 向量数据库配置。
 
-@FilePath: config/milvus_config.py
-@Date: 2026-09-07
-@Description: 加载向量数据库地址和各类知识集合名称。
+config/milvus_config.py
+
+加载向量数据库地址和各类知识集合名称。
 """
 
 from dataclasses import dataclass

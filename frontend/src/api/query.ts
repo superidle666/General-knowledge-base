@@ -32,6 +32,9 @@ export type QuerySource = {
   source: string
   url: string | null
   site_name: string | null
+  // 精排把同一章节的过切碎片合并成一条时给段数（>=2）；来源仍只占 1 条。
+  // 可选字段：旧会话历史里没有，缺省不显示“含 N 段”
+  merged_parts?: number | null
 }
 
 export type QueryResponse = {

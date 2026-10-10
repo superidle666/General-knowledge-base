@@ -5,12 +5,12 @@ processor/query_processor/nodes/node_rerank.py
 
 对多路召回结果进行精排和断崖截断，输出最终知识片段集合。
 """
-import os
 import re
 from typing import Dict, Any, List
 
 from processor.query_processor.base import NodeBase
 from processor.query_processor.state import QueryGraphState
+from processor.query_processor.topic_consistency import GUARD_DISABLE_ENV, align_window_to_topic
 from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
 from utils.reranker_http_utils import rerank_documents
@@ -37,13 +37,16 @@ RERANK_MAX_WEB_CANDIDATES: int = 10
 # 单条切片送精排前的截断长度：只影响送给模型的文本，不影响最终送给大模型生成
 # 的完整 content（那里另有 MAX_CONTEXT_CHARS 预算）。
 RERANK_MAX_CONTENT_CHARS: int = 1000
+# 合并体的探测预算下限：预算按分片均摊时，每片至少要留下这么多字，否则三片以上
+# 的合并块每片只剩零星几个词，等于没给交叉编码器可判断的依据。
+RERANK_PROBE_MIN_PER_PART: int = 200
 # 精排失败降级时给 web 结果的固定分：本地切片按组内 RRF 分数归一到 0~1，1.0 是最强
 # 本地命中、长尾接近 0；给 web 一个中位值意味着“比本地长尾可靠、但不压过最强本地资料”，
 # 而不再像以前那样带着 None 被排到末位。
 RERANK_FALLBACK_WEB_SCORE: float = 0.5
 
 # -----------------------------
-# 方案 A：rerank 出口的两步排序修正（图片 markdown 折叠 + 同标题碎片合并）
+# 方案 A：排序的两步修正（图片 markdown 折叠 + 同标题碎片合并）
 # -----------------------------
 # 华为库三题 trace 暴露：无关近邻块的高分其实是“图片喂出来的假相关”——VL 图注和 MinIO
 # URL 里混进了“相机/打开/峰值容量”等 query 词，把真正的短答案块挤出 top-3；同一超长章节
@@ -52,6 +55,9 @@ RERANK_FALLBACK_WEB_SCORE: float = 0.5
 # RERANK_A_IMAGE_COLLAPSE_DISABLE =1 可分别回到旧行为做基线对比。
 # （曾用“超长块按字符数降权”作为第二步，实测图片折叠后它完全 dormant 且不通用于其它文档，已移除。）
 # 同标题过切块合并：把带尾部片段序号 “-<数字>” 的碎片按基标题并回一条，去重占坑。
+# 合并必须发生在**送精排之前**（R11）：后置合并时合并体沿用的是某一张单片（还被截到
+# 1000 字）的分，正文却是几倍长，断崖阈值与来源面板的相关度分档都建立在不再代表当前
+# 内容的分数上；前置之后交叉编码器直接看合并内容打分，量纲自然正确。
 _RERANK_A_FRAGMENT_SUFFIX_RE = re.compile(r'-\d+$')
 
 # 图片 markdown 折叠：![..](url) → [图]。MinIO 图片链接把整篇文档标题嵌进 URL、
@@ -87,11 +93,6 @@ class NodeRerank(NodeBase):
         # 2. Rerank 精排(精排打分)
         reranked_docs: List[Dict[str, Any]] = self._step_2_rerank_merged_docs(state, merged_multi_docs)
 
-        # 2.5 方案A 排序修正：同标题过切块合并（图片折叠已在送精排时生效，见 _rerank_input_text）。
-        # 仅正常精排路径生效；降级路径的分数是召回序投影，不做这些修正。
-        if not state.get("rerank_failed"):
-            reranked_docs = self._step_2c_merge_same_section_fragments(reranked_docs)
-
         # 3. 动态 Top_K 截取(断崖检测)。窗口宽度以用户 top_k 封顶（Phase3 决策1a）：
         # 出口从“恒 RERANK_MAX_TOPK”收窄到 clamp(top_k, MIN, MAX)，让“读几条=展示几条=top_k”；
         # 送精排的候选余量仍由 _candidate_limits（floor 到 RERANK_MAX_TOPK）保留，断崖才看得到下降段。
@@ -103,11 +104,41 @@ class NodeRerank(NodeBase):
         else:
             cutoff_docs = self._step_3_cliff_cutoff(reranked_docs, window_cap)
 
-        # 4. 更新state
-        state['reranked_docs'] = cutoff_docs
+        # 4. 出口话题一致性校验（M6）：断崖只管分数掉队，管不了“高分但其实讲的是另一个型号”。
+        #    位置刻意在两条出口（正常精排 / 降级召回序）汇合之后、写回 state 之前：放在精排
+        #    成功分支里就等于精排一挂校验形同虚设；放在答案节点之前会破坏“sources 与生成切片
+        #    同源”（红线 3），而这里改的就是 reranked_docs，来源照样从它派生。
+        state['reranked_docs'] = self._step_4_topic_consistency_guard(state, cutoff_docs, reranked_docs)
 
         # 5. 返回state
         return state
+
+    def _step_4_topic_consistency_guard(
+        self,
+        state: QueryGraphState,
+        window_docs: List[Dict[str, Any]],
+        ranked_docs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """把窗口里“整篇没提本轮话题实体”的本地切片，换成窗口外确实提了它的切片（M6，等量替换）。
+
+        治的是交叉编码器打分治不了的那一半：图注与 URL 里的词能把无关型号顶到高分，
+        而“这个名字到底在不在切片里”是确定的字符串事实，不依赖任何 Milvus 新列，
+        disabled 库（无词表、无 item_name 可过滤）也能用（详见 topic_consistency 模块）。
+        换入的候选来自断崖砍掉的那一段，所以入参传的是完整降序候选而不是窗口。
+        DRIFT_GUARD_DISABLE=1 时只做判断与日志、不改结果，便于线上回到旧行为做对比。
+        任何异常一律原样放行：这是锦上添花的兜底层，不能让它自己变成新的故障源。
+        """
+        if not window_docs:
+            return window_docs
+        # 窗口是 ranked_docs 的前缀（断崖与降级两条路径都是切片而来），剩下的就是窗口外候选。
+        pool_docs = ranked_docs[len(window_docs):]
+        try:
+            return align_window_to_topic(
+                state, window_docs, pool_docs, apply_changes=not self._env_disabled(GUARD_DISABLE_ENV)
+            )
+        except Exception as error:
+            logger.warning("话题一致性校验异常，沿用重排原窗口：%s", error)
+            return window_docs
 
     def _step_1_merge_multi_source_docs(self, state: QueryGraphState) -> List[Dict[str, Any]]:
         """合并本地 RRF 结果和网络搜索结果为统一格式（并按精排预算截断候选数）。"""
@@ -116,7 +147,7 @@ class NodeRerank(NodeBase):
         local_limit, web_limit = self._candidate_limits(state)
 
         # 1. 获取本地 RRF 的文档（已按 RRF 得分降序，取头部就是最相关的一批）
-        # 先剔除“正文即标题”的纯标题空块再截断：这类块零信息量，却因与查询
+        # 先剔除“正文即标题”的纯标题空块再合并、再截断：这类块零信息量，却因与查询
         # 词面/实体高度重合而被交叉编码器打高分，不剔除会霸榜、抬高相对淘汰线误杀真块、
         # 甚至在自己之后就触发断崖把答案切掉。先过再截，才能用更深的候选补回真实块。
         local_docs = [
@@ -124,6 +155,12 @@ class NodeRerank(NodeBase):
             for rrf_doc in (state.get('rrf_chunks') or [])
             if not self._is_heading_only_doc(rrf_doc)
         ]
+        # 碎片合并在**截断候选之前**（R11）：合并的另一个动机是“去重占坑”——同一超长章节
+        # 被切成 -1/-2/-3 时，三条碎片要吃掉三份候选名额，把其它章节的真实答案块挤在窗口
+        # 之外；先合再截，名额才按“几个不同来源”而不是“几个片段”分配。
+        # web 结果不参与合并：它的标题来自搜索引擎页面，恰好以 “-<数字>” 结尾（版本号、
+        # 页码）就会被误并，而跨文档拼接正文根本不可能发生在联网结果上。
+        local_docs = self._merge_local_fragments(local_docs)
         for rrf_doc in local_docs[:local_limit]:
             format_rrf_doc = {**rrf_doc, "url": None, "source": "local"}
             final_docs.append(format_rrf_doc)
@@ -192,12 +229,17 @@ class NodeRerank(NodeBase):
 
     @classmethod
     def _rerank_input_text(cls, doc: Dict[str, Any]) -> str:
-        """送精排的单条文本：先折叠图片 markdown（去 URL/摘要噪声），缺失/None 用空串占位，再按上限截断。
+        """送精排的单条文本：合并体直接用按分片均摊过预算的探测文本，其余折叠图片后按上限截断。
 
         web 结果没有 snippet 时上一步拿到的就是 None，把它塞进批量请求可能让整次
         外部调用失败——一条脏数据毁掉全部候选的重排，代价远大于这一条少几个字。
         只缩短送给模型的副本，doc["content"] 本体不变（生成阶段还要用全文）。
         """
+        probe = doc.get("rerank_probe")
+        if probe is not None and str(probe).strip():
+            # 合并体不能直接截合并正文的头部：那只看得到第 1 片（往往不是最强命中那一片），
+            # 后面几片的信号全丢。均摊预算在合并时已做好（见 _fragment_probe_text）。
+            return str(probe)[:RERANK_MAX_CONTENT_CHARS]
         content = doc.get("content")
         text = "" if content is None else str(content)
         text = cls._collapse_image_markdown(text)
@@ -287,11 +329,7 @@ class NodeRerank(NodeBase):
         return ranked
 
     # ---------------- 方案 A：图片折叠 + 同标题碎片合并 ----------------
-    @staticmethod
-    def _env_disabled(name: str) -> bool:
-        """环境变量开关：设成 1/true/yes 视为关闭该步（默认开启，便于评测直接生效）。"""
-        return os.getenv(name, "").strip().lower() in {"1", "true", "yes"}
-
+    # 开关判定 `_env_disabled` 已上移到 NodeBase（与答案节点的图片语义否决共用一套语义）。
     @classmethod
     def _collapse_image_markdown(cls, text: str) -> str:
         """把 Markdown 图片 ![..](url) 折叠成 [图]，仅在重排阶段用（不改存储/不影响显示）。
@@ -315,37 +353,94 @@ class NodeRerank(NodeBase):
         """还原片段所属的章节基标题（去掉尾部 “-<数字>” 片段序号）。"""
         return _RERANK_A_FRAGMENT_SUFFIX_RE.sub("", str(doc.get("title") or "").strip())
 
-    def _step_2c_merge_same_section_fragments(self, ranked_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """把同基标题的过切碎片并回一条，避免 “标题-1/-2/-3” 各自占坑、挤掉短答案块。
+    def _merge_local_fragments(self, local_docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """把同一文档内同基标题的过切碎片并回一条，在送精排**之前**完成（R11）。
 
-        合并代表分取全组最高分（保留该章节最强命中的分数），正文按片段序号
-        顺序拼接并去掉重复标题前缀；只合并“确实带 -N 后缀且同基标题 ≥2 块”的碎片，孤立碎片
-        或无后缀的同名不同章节一律不并，避免误伤。
+        只合并“同一文档下、确实带 -N 后缀且同基标题 ≥ 2 块”的碎片：孤立碎片、无后缀的
+        同名章节一律不并（沿用现约束）；**跨文档**的同名碎片也不并——同一份手册重复导入
+        时两份会有完全相同的章节标题，拼起来就是一个归属错误、正文却混了两份文档的来源。
+        合并体插在该组**首个成员原位置**、其余成员移除，不额外重排：让 RRF 名次决定谁
+        拿到候选名额，本函数不做二次评判。
         """
-        if self._env_disabled("RERANK_A_MERGE_DISABLE") or not ranked_docs:
-            return ranked_docs
-        groups: Dict[str, List[Dict[str, Any]]] = {}
-        standalone: List[Dict[str, Any]] = []
-        for doc in ranked_docs:
-            if self._is_fragment(doc):
-                groups.setdefault(self._base_title(doc), []).append(doc)
-            else:
-                standalone.append(doc)
-        mergeable = {base: members for base, members in groups.items() if len(members) >= 2}
+        if self._env_disabled("RERANK_A_MERGE_DISABLE") or len(local_docs) < 2:
+            return local_docs
+        groups: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
+        for doc in local_docs:
+            group_key = self._fragment_group_key(doc)
+            if group_key is not None:
+                groups.setdefault(group_key, []).append(doc)
+        mergeable = {key: members for key, members in groups.items() if len(members) >= 2}
         if not mergeable:
-            return ranked_docs
-        merged_docs = list(standalone)
-        for base, members in mergeable.items():
-            members_sorted = sorted(members, key=self._fragment_part_no)
-            best = max(members, key=lambda d: d.get("score") if isinstance(d.get("score"), (int, float)) else float("-inf"))
-            merged_docs.append({
-                **best,
-                "title": base,
-                "content": self._merge_fragment_bodies(base, members_sorted),
-                "merged_parts": len(members),
-            })
-        merged_docs.sort(key=self._score_or_min, reverse=True)
+            return local_docs
+        merged_by_key = {
+            key: self._build_merged_fragment_doc(key[1], members)
+            for key, members in mergeable.items()
+        }
+        emitted: set[tuple[str, str]] = set()
+        merged_docs: List[Dict[str, Any]] = []
+        for doc in local_docs:
+            group_key = self._fragment_group_key(doc)
+            if group_key not in merged_by_key:
+                merged_docs.append(doc)
+                continue
+            if group_key in emitted:
+                continue
+            emitted.add(group_key)
+            merged_docs.append(merged_by_key[group_key])
         return merged_docs
+
+    @classmethod
+    def _fragment_group_key(cls, doc: Dict[str, Any]) -> tuple[str, str] | None:
+        """碎片归组键：(文档标识, 基标题)；非碎片返回 None，普通章节永远不进合并组。"""
+        if not cls._is_fragment(doc):
+            return None
+        document_id = doc.get("document_id")
+        # 拿不到 document_id（旧集合、手工构造的切片）时退化为空标识：同组内仍然只
+        # 可能是同一份正文，不因为新约束把改前能合并的场景拆开。
+        return (str(document_id) if document_id is not None else "", cls._base_title(doc))
+
+    def _build_merged_fragment_doc(self, base: str, members: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """按片段序拼出合并体：正文取全集，分数种子取组内最强那片，溯源带上全部分片。"""
+        members_sorted = sorted(members, key=self._fragment_part_no)
+        best = max(members, key=self._rrf_score_or_min)
+        part_chunk_ids = [
+            doc.get("chunk_id") for doc in members_sorted if doc.get("chunk_id") is not None
+        ]
+        # 以组内 RRF 分最高的分片为模板：document_id / chunk_index / file_name / item_name
+        # 这些库内字段都从它继承（合并体得先是一个合法的本地切片，才能被接口层回源）；
+        # rrf_score 同样沿用它的值，精排失败走降级排序时合并体就按这个种子参与归一。
+        return {
+            **best,
+            "title": base,
+            "content": self._merge_fragment_bodies(base, members_sorted),
+            "merged_parts": len(members_sorted),
+            "part_chunk_ids": part_chunk_ids,
+            "rerank_probe": self._fragment_probe_text(members_sorted),
+        }
+
+    @classmethod
+    def _fragment_probe_text(cls, members_sorted: List[Dict[str, Any]]) -> str:
+        """合并体送精排的探测文本：预算按分片均摊，每一片都留下自己的开头。
+
+        让交叉编码器看得到“这一条其实是 N 段”，分才是打在合并内容上的分，背后的
+        断崖阈值与来源面板的分档才同一把尺；只截头部则只判了第 1 片的相关度。
+        """
+        per_part = max(
+            RERANK_MAX_CONTENT_CHARS // max(len(members_sorted), 1),
+            RERANK_PROBE_MIN_PER_PART,
+        )
+        parts: List[str] = []
+        for doc in members_sorted:
+            piece = cls._collapse_image_markdown(str(doc.get("content") or ""))[:per_part]
+            if piece.strip():
+                parts.append(piece)
+        return "\n\n".join(parts)[:RERANK_MAX_CONTENT_CHARS]
+
+    @staticmethod
+    def _rrf_score_or_min(doc: Dict[str, Any]) -> float:
+        """取代表分片的排序键：拿不到融合分的沉底（None 不能参与比较报 TypeError）。"""
+        value = doc.get("rrf_score")
+        return float(value) if isinstance(value, (int, float)) else float("-inf")
 
     @classmethod
     def _fragment_part_no(cls, doc: Dict[str, Any]) -> int:
@@ -365,12 +460,6 @@ class NodeRerank(NodeBase):
                 chunks.append(content)
         prefix = f"{base}\n\n" if base else ""
         return (prefix + "\n\n".join(chunks)).strip()
-
-    @staticmethod
-    def _score_or_min(doc: Dict[str, Any]) -> float:
-        """排序键：无分数（None）沉底，不让 None 参与比较报 TypeError。"""
-        value = doc.get("score")
-        return float(value) if isinstance(value, (int, float)) else float("-inf")
 
     def _step_3_cliff_cutoff(self, ranked_docs: List[Dict[str, Any]], window_cap: int) -> List[Dict[str, Any]]:
         """断崖检测截断：在不超过 window_cap 的前提下，相邻得分差距超过阈值时提前截断。

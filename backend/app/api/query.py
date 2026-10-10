@@ -132,6 +132,41 @@ def _web_source_out(source: dict) -> QuerySourceOut:
     )
 
 
+def _local_source_out(
+    chunk: DocumentChunk,
+    document: Document,
+    source: dict,
+    valid_part_ids: set[str],
+) -> QuerySourceOut:
+    """把一条本地来源转成对外结构；合并来源的正文与段数按**实际可溯源**的分片给出。"""
+    metadata = chunk.extra_metadata or {}
+    part_ids = [
+        str(part_id) for part_id in (source.get("part_chunk_ids") or []) if part_id is not None
+    ]
+    # 只数“库里还存在”的分片：文档已删/未 ready 的那几段不能算进“含 N 段”，
+    # 否则展示的是一个无法溯源的段数。
+    merged_parts = len({part_id for part_id in part_ids if part_id in valid_part_ids})
+    content = chunk.content
+    if merged_parts > 1:
+        # 合并来源是个例外：模型实际读到的是几段拼接后的正文，MySQL 里代表片的单段正文
+        # 已不代表它；这里改用检索链路带出的合并正文，保证“展示的内容 = 读过的内容”。
+        content = str(source.get("content") or "").strip() or chunk.content
+    return QuerySourceOut(
+        chunk_id=chunk.vector_id,
+        document_id=document.id,
+        document_title=document.title,
+        chunk_index=chunk.chunk_index,
+        page_number=chunk.page_number,
+        section_title=chunk.section_title,
+        parent_title=str(metadata.get("parent_title") or "") or None,
+        content=content,
+        score=source.get("score"),
+        score_kind=str(source.get("score_kind") or "rerank"),
+        source="local",
+        merged_parts=merged_parts if merged_parts > 1 else None,
+    )
+
+
 async def _hydrate_sources(
     session: AsyncSession,
     library_id: int,
@@ -144,12 +179,21 @@ async def _hydrate_sources(
     """
     hydrated: list[QuerySourceOut] = []
     source_by_vector_id: dict[str, dict] = {}
+    check_ids: set[str] = set()
     for source in sources:
         if str(source.get("source") or "local") == "web":
             hydrated.append(_web_source_out(source))
             continue
-        if source.get("chunk_id") is not None:
-            source_by_vector_id[str(source["chunk_id"])] = source
+        if source.get("chunk_id") is None:
+            continue
+        representative = str(source["chunk_id"])
+        source_by_vector_id[representative] = source
+        # 校验集合包含合并来源的全部候选分片：它们共用这一次 IN 查询（不额外多一次 RPC），
+        # 拿回来的存在集合才能算出“哪几段现在还可溯源”。
+        check_ids.add(representative)
+        for part_id in source.get("part_chunk_ids") or []:
+            if part_id is not None:
+                check_ids.add(str(part_id))
     if not source_by_vector_id:
         hydrated.sort(key=lambda item: (item.score is None, -(item.score or 0)))
         return hydrated
@@ -160,27 +204,22 @@ async def _hydrate_sources(
             Document.library_id == library_id,
             Document.status == "ready",
             Document.deleted_at.is_(None),
-            DocumentChunk.vector_id.in_(source_by_vector_id),
+            DocumentChunk.vector_id.in_(check_ids),
         )
     )
+    row_by_vector_id: dict[str, tuple[DocumentChunk, Document]] = {}
+    valid_vector_ids: set[str] = set()
     for chunk, document in rows:
-        source = source_by_vector_id.get(str(chunk.vector_id))
-        if source is None:
+        vector_id = str(chunk.vector_id)
+        valid_vector_ids.add(vector_id)
+        row_by_vector_id.setdefault(vector_id, (chunk, document))
+    for vector_id, source in source_by_vector_id.items():
+        row = row_by_vector_id.get(vector_id)
+        if row is None:
+            # 代表片查不到（文档已删/未 ready）→ 整条来源丢弃：宁可不展示，也不展示无法溯源的引用
             continue
-        metadata = chunk.extra_metadata or {}
-        hydrated.append(QuerySourceOut(
-            chunk_id=chunk.vector_id,
-            document_id=document.id,
-            document_title=document.title,
-            chunk_index=chunk.chunk_index,
-            page_number=chunk.page_number,
-            section_title=chunk.section_title,
-            parent_title=str(metadata.get("parent_title") or "") or None,
-            content=chunk.content,
-            score=source.get("score"),
-            score_kind=str(source.get("score_kind") or "rerank"),
-            source="local",
-        ))
+        chunk, document = row
+        hydrated.append(_local_source_out(chunk, document, source, valid_vector_ids))
     hydrated.sort(
         key=lambda item: (
             item.score is None,

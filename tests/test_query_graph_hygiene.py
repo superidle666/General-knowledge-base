@@ -19,6 +19,7 @@ from graph_introspection import (
     QUERY_MAIN_GRAPH,
     conditional_edge_targets,
     literal_string_returns,
+    state_key_writes,
 )
 from processor.query_processor.main_graph import get_kb_query_workflow
 from processor.query_processor.nodes import node_search_embedding_hyde as hyde_module
@@ -27,6 +28,7 @@ from processor.query_processor.nodes.node_search_embedding_hyde import NodeSearc
 from processor.query_processor.nodes.node_web_search_mcp import NodeWebSearchMcp
 
 HYDE_NODE = PROJECT_ROOT / "processor" / "query_processor" / "nodes" / "node_search_embedding_hyde.py"
+PREPARE_NODE = PROJECT_ROOT / "processor" / "query_processor" / "nodes" / "node_prepare_query.py"
 API_QUERY = PROJECT_ROOT / "backend" / "app" / "api" / "query.py"
 QUERY_NODES_DIR = PROJECT_ROOT / "processor" / "query_processor" / "nodes"
 
@@ -239,6 +241,39 @@ def test_query_api_stops_building_a_graph_per_request() -> None:
     text = API_QUERY.read_text(encoding="utf-8")
     assert "KBQueryWorkflow()" not in text, "接口层还在每请求 new 一个工作流（含一次图编译）"
     assert text.count("get_kb_query_workflow()") == 2, "同步与流式两条链路都要改用共享工作流"
+
+
+def test_retrieval_rewrites_never_touch_the_refusal_channel() -> None:
+    """R2 的硬边界：往检索词里补实体（指代回填 M4、对齐规范名回填 M5）只能写 rewritten_query。
+
+    `query_entity_text` 是拒答/清单判定的【本轮原文】通道，一旦被回填历史实体污染，
+    "用户本轮点名了查无此型"就变成恒真命题——上一轮出现过的型号能把本轮的泛问题硬拒掉。
+    这条不会让功能立刻出错，只会在半年后重新变成线上误拒答，所以用 AST 钉死而不是靠 review：
+    全文件对 `state["query_entity_text"]` 的赋值必须只有一处，且赋的是入口校验用的那个裸 query。
+    """
+    tree = ast.parse(PREPARE_NODE.read_text(encoding="utf-8"))
+    writes: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "state"
+                and isinstance(target.slice, ast.Constant)
+                and target.slice.value == "query_entity_text"
+            ):
+                writes.append((node.lineno, ast.unparse(node.value)))
+    assert len(writes) == 1, f"原文通道出现了多处写入：{writes}"
+    assert writes[0][1] == "query", f"原文通道被改写成非入口原文：{writes[0]}"
+
+    # 两个回填步骤自己也不许碰状态里的判定通道：M4 只返回字符串，M5 只写检索词
+    assert state_key_writes(PREPARE_NODE, "NodePrepareQuery", "_topic_entity_from_history") == set()
+    assert state_key_writes(PREPARE_NODE, "NodePrepareQuery", "_inject_aligned_entity") == {"rewritten_query"}
 
 
 def test_query_nodes_hold_no_request_state() -> None:

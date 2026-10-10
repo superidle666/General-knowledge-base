@@ -7,12 +7,25 @@ _answer_output 节点在拼 prompt 时有两条独立预算：历史对话与参
 
 from __future__ import annotations
 
+import ast
+import logging
+import re
+
 from processor.query_processor.nodes.node_answer_output import (
+    IMAGE_ALT_VETO_DISABLE_ENV,
     MAX_CONTEXT_CHARS,
     MAX_HISTORY_CHARS,
     STATIC_REPLY_DELAY_SECONDS,
     NodeAnswerOutput,
 )
+from tests.graph_introspection import PROJECT_ROOT
+
+ANSWER_NODE_PATH = PROJECT_ROOT / "processor" / "query_processor" / "nodes" / "node_answer_output.py"
+
+
+def _answer_node_ast() -> ast.Module:
+    """答案节点的语法树（只读源码，不执行它）：静态守卫专用。"""
+    return ast.parse(ANSWER_NODE_PATH.read_text(encoding="utf-8"))
 
 
 def _docs(count: int, *, size: int = 800, **overrides: object) -> list[dict]:
@@ -162,6 +175,99 @@ def test_prompt_without_reference_content_still_builds() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R10：文档预算装不下时按条跳过，而不是整段收尾
+# 碎片合并（R11）恰好会造出“一条特别长”的块，旧 break 写法能让它把后面本可装下的
+# 短答案块整体挡掉，而 sources 与 prompt 同源，被挡掉的块连引用都不展示。
+# ---------------------------------------------------------------------------
+
+def _budget() -> int:
+    return MAX_CONTEXT_CHARS - MAX_HISTORY_CHARS
+
+
+def _huge(*, chunk_id: int = 1, title: str = "合并章节", extra: int = 500) -> dict:
+    """一条本身就超过整段文档预算的块（合并三片后的典型形状）。"""
+    return {
+        "content": f"{title}的合并正文：" + "啊" * (_budget() + extra),
+        "source": "local",
+        "chunk_id": chunk_id,
+        "title": title,
+        "score": 0.9,
+    }
+
+
+def _small(index: int, *, score: float = 0.5) -> dict:
+    return {
+        "content": f"短答案{index}：断电后静置十分钟再拆护板。",
+        "source": "local",
+        "chunk_id": 100 + index,
+        "title": f"短章节{index}",
+        "score": score,
+    }
+
+
+def test_oversized_doc_does_not_block_later_short_docs() -> None:
+    node = NodeAnswerOutput()
+    huge = _huge()
+    assert len(huge["content"]) > _budget(), "用例本身得先保证这条真的整段装不下"
+    context_str, used_docs, _ = node._select_context_docs([huge, _small(0), _small(1)], _budget())
+    assert "短答案0" in context_str and "短答案1" in context_str
+    # 超长块被跳过而不是带着半截正文进 prompt：截断会把 ![](url) 从中间切断（前端裂图）
+    assert [doc["chunk_id"] for doc in used_docs] == [100, 101]
+
+
+def test_budget_skipped_docs_never_reach_the_source_list() -> None:
+    """同源口径不能因为改成跳过而回退：模型没读过的块，就不能出现在用户面前。"""
+    node = NodeAnswerOutput()
+    state = _state(reranked_docs=[_huge(), _small(0)])
+    node._step_2_construct_prompt(state)
+    assert [source["chunk_id"] for source in state["sources"]] == [100]
+
+
+def test_skipping_keeps_the_total_context_within_budget() -> None:
+    """把既有"停止追加"用例的语义升级为"总长度受控"：交错尺寸也不许溢出。"""
+    node = NodeAnswerOutput()
+    docs: list[dict] = []
+    for index in range(4):
+        docs.append(_huge(chunk_id=index, title=f"合并章节{index}"))
+        docs.append(_small(index))
+    context_str, used_docs, remaining = node._select_context_docs(docs, _budget())
+    assert len(context_str) <= _budget(), f"参考内容长度 {len(context_str)} 超出预算 {_budget()}"
+    assert remaining >= 0
+    # 旧的 break 在这里一条都装不下（第一条就是超长块），跳过策略才能留下这 4 条
+    assert [doc["chunk_id"] for doc in used_docs] == [100, 101, 102, 103]
+
+
+def test_skipped_docs_are_logged_with_index_and_size(caplog) -> None:
+    """这类丢弃过去完全不可见，只能从"答案少了点东西"反推；现在必须能从日志里查到是谁。"""
+    node = NodeAnswerOutput()
+    huge = _huge()
+    with caplog.at_level(logging.DEBUG, logger="kb"):
+        node._select_context_docs([huge, _small(0)], _budget())
+    text = "\n".join(record.getMessage() for record in caplog.records if record.name == "kb")
+    assert "跳过 1 条" in text
+    pairs = re.findall(r"\((\d+), (\d+)\)", text)
+    assert pairs, f"日志没给出被跳过条目的序号与长度：{text}"
+    index, entry_len = (int(value) for value in pairs[0])
+    assert index == 1, "记录的必须是它在候选里的序号，引用号才不会前移"
+    assert entry_len > len(huge["content"]), "记录的长度要含元数据头，否则与预算口径不一致"
+
+
+def test_all_small_docs_match_the_previous_output_exactly() -> None:
+    """反向回归：一条都不超预算时，拼出的上下文与改动前逐字相等。"""
+    node = NodeAnswerOutput()
+    docs = _docs(6, size=400)
+    context_str, used_docs, remaining = node._select_context_docs(docs, _budget())
+    assert [doc["chunk_id"] for doc in used_docs] == [index for index in range(6)]
+    assert remaining > 0
+    expected = "\n\n".join(
+        f"[{index + 1}] [source=local] [chunk_id={index}] [title=章节{index}]"
+        f" [score={0.9 - index * 0.01:.4f}]\n{docs[index]['content']}"
+        for index in range(len(docs))
+    )
+    assert context_str == expected
+
+
+# ---------------------------------------------------------------------------
 # 臆造图片剔除：模型会自编 ![外观图](http://...) 写进正文，前端 markdown 渲染就是裂图；
 # 白名单（来自召回切片）之外的图片引用要整行删掉，白名单内的不能误删。
 # ---------------------------------------------------------------------------
@@ -197,6 +303,83 @@ def test_sanitize_strips_all_images_when_recall_has_none() -> None:
     assert image_urls == []
     cleaned = node._sanitize_unverified_images(answer, set(image_urls))
     assert "![" not in cleaned and "参数如下。" in cleaned
+
+
+# ---------------------------------------------------------------------------
+# 图片出口的语义否决（线上实测：HAK 180 烫金机的回答底部把手册封面条形码当外观图贴了出来）
+# 出处白名单只回答“这张图在本库真的存在吗”，不回答“它是不是在讲这个产品”；
+# alt 是导入期多模态模型写的文档事实，拿它做一道零模型调用的确定性否决。
+# ---------------------------------------------------------------------------
+
+_BARCODE_URL = "http://minio.test/real/barcode.jpg"
+_BARCODE_DOC = {
+    "content": (
+        "![```markdownHAK 180 烫金机产品安全手册封面条形码（含型号 D01WD7001-00 及 SCHN 标识）```]"
+        f"({_BARCODE_URL})\nD01WD7001-00"
+    ),
+    "source": "local",
+    "chunk_id": 11,
+}
+
+
+def test_barcode_image_is_vetoed_even_when_the_model_calls_it_appearance() -> None:
+    """判据取切片里那份 alt，不取模型自己写的描述：错配时模型完全可能把 alt 改成“外观图”。"""
+    node = NodeAnswerOutput()
+    answer = f"是的，有烫金机。\n![HAK 180 烫金机外观图]({_BARCODE_URL})"
+
+    assert node._extract_images_from_answer(answer, [_BARCODE_DOC], "有烫金机吗") == []
+
+
+def test_vetoed_image_is_also_stripped_from_the_answer_body() -> None:
+    """否决要同时作用到前端可见的正文：只进不了 image_urls 不够，正文里的 markdown 仍会被渲染。"""
+    node = NodeAnswerOutput()
+    answer = f"是的，有烫金机。\n![外观图]({_BARCODE_URL})\n如需详情请访问官网。"
+    image_urls = node._extract_images_from_answer(answer, [_BARCODE_DOC], "有烫金机吗")
+    cleaned = node._sanitize_unverified_images(answer, set(image_urls))
+
+    assert image_urls == []
+    assert "![" not in cleaned and _BARCODE_URL not in cleaned
+    assert "是的，有烫金机。" in cleaned and "如需详情请访问官网。" in cleaned
+
+
+def test_the_veto_yields_when_the_user_is_asking_about_that_very_thing() -> None:
+    """本轮就在问条码/铭牌时，这张图正好就是答案：不能一律地屏蔽标识图。"""
+    node = NodeAnswerOutput()
+    answer = f"铭牌位置见下图。\n![封面条形码]({_BARCODE_URL})"
+
+    assert node._extract_images_from_answer(answer, [_BARCODE_DOC], "设备条形码在哪里看") == [_BARCODE_URL]
+
+
+def test_image_without_any_alt_is_kept() -> None:
+    """fail-open：旧集合/无摘要图拿不到语义依据，不能因此屏蔽真图（与宁查勿否同向）。"""
+    node = NodeAnswerOutput()
+    doc = {"content": "面板图。\n![](http://minio.test/real/panel.png)", "source": "local", "chunk_id": 12}
+    answer = "面板如下图。\n![面板图](http://minio.test/real/panel.png)"
+
+    assert node._extract_images_from_answer(answer, [doc], "面板上有哪些按键") == [
+        "http://minio.test/real/panel.png"
+    ]
+
+
+def test_the_veto_can_be_switched_back_to_the_old_behaviour(monkeypatch) -> None:
+    """与 DRIFT_GUARD_DISABLE 同族：设 IMAGE_ALT_VETO_DISABLE=1 退回“只看 URL 出处”。"""
+    monkeypatch.setenv(IMAGE_ALT_VETO_DISABLE_ENV, "1")
+    node = NodeAnswerOutput()
+    answer = f"是的，有烫金机。\n![外观图]({_BARCODE_URL})"
+
+    assert node._extract_images_from_answer(answer, [_BARCODE_DOC], "有烫金机吗") == [_BARCODE_URL]
+
+
+def test_the_answer_node_feeds_the_current_turn_text_to_the_veto() -> None:
+    """接线守卫：判定“本轮在问什么”只吃本轮原文（R2），不能拿回填过的检索词去豁免。"""
+    call = next(
+        node for node in ast.walk(_answer_node_ast())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_extract_images_from_answer"
+    )
+    assert len(call.args) == 3, "必须显式传入本轮原文，否则“用户在问条码”这道豁免拿不到输入"
+    assert "query_entity_text" in ast.unparse(call.args[2])
 
 
 def test_sanitize_leaves_plain_links_untouched() -> None:

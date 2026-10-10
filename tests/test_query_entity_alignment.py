@@ -14,7 +14,10 @@ import pytest
 from graph_introspection import PROJECT_ROOT, typed_dict_keys
 
 from processor.query_processor.chitchat_gate import normalize_for_match
-from processor.query_processor.nodes.node_prepare_query import NodePrepareQuery
+from processor.query_processor.nodes.node_prepare_query import (
+    BRAND_GROUP_FILTER_DISABLE_ENV,
+    NodePrepareQuery,
+)
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
 API_QUERY = PROJECT_ROOT / "backend" / "app" / "api" / "query.py"
@@ -244,6 +247,68 @@ def test_required_without_any_mention_falls_back_to_unfiltered(node) -> None:
 def test_required_with_empty_vocabulary_falls_back_to_unfiltered(node) -> None:
     # 本库暂无可对齐实体（如全部导入失败）→ 不能把正常问题误判为拒答
     state = node.process(_required_state("HAK-180 报错", []))
+    assert state["item_names"] == []
+    assert not state.get("answer")
+
+
+# --------------------------------------------------------------------------
+# 二·五、R7：本轮只说到品牌时，拿品牌组把检索收窄到本库那一款
+# --------------------------------------------------------------------------
+
+# 照库 33“手机商品介绍”的真实词表搭的假数据（规范名与 Milvus 的 item_name 逐字一致）
+PHONE_VOCABULARY = [
+    {"name": "一加 Ace 6T", "aliases": []},
+    {"name": "iPhone 18 Pro", "aliases": ["iPhone 18"]},
+    {"name": "Redmi K80", "aliases": []},
+]
+
+
+def test_brand_only_mention_narrows_to_the_single_product_of_that_brand(node) -> None:
+    """`苹果手机` 与规范名 `iPhone 18 Pro` 字面永不相交，但品牌组能对上：唯一命中就上过滤。"""
+    state = node.process(_required_state("有苹果手机吗", PHONE_VOCABULARY))
+    assert state["item_names"] == ["iPhone 18 Pro"]
+    assert not state.get("answer")  # 收窄不是拒答也不是反问
+
+
+def test_brand_followup_after_backfill_narrows_too(node) -> None:
+    """漂移现场那一例：第二句本轮没主语，靠 M4 回填的 `苹果手机` 也要能收窄。"""
+    state = _required_state("有什么存储类型", PHONE_VOCABULARY)
+    state["history"] = [{"role": "user", "text": "有苹果手机吗"}]
+    result = node.process(state)
+    assert result["item_names"] == ["iPhone 18 Pro"], "第二句不能再拿别家型号的存储参数来答"
+    assert "iPhone 18 Pro" in result["rewritten_query"]  # M5 跟着把规范名拼进检索词
+    assert "苹果手机" in result["rewritten_query"]  # M4 回填还在（同一口径，不是又拼一份）
+    assert result["query_entity_text"] == "有什么存储类型"  # R2：原文通道不吃回填
+
+
+def test_two_products_of_the_same_brand_is_not_guessed(node) -> None:
+    """同品牌下了两款就不猜：拿猜测收窄会把答案钉到用户没问的那一款上。"""
+    vocabulary = [{"name": "iPhone 18 Pro", "aliases": []}, {"name": "iPad Air", "aliases": []}]
+    state = node.process(_required_state("有苹果手机吗", vocabulary))
+    assert state["item_names"] == []
+    assert not state.get("answer")
+
+
+def test_a_numbered_mention_never_gets_brand_substituted(node) -> None:
+    """点名了 iPhone 17（本库没有）也不能被品牌组换成 18：宁可退回不带过滤检索。"""
+    node._call_entity_llm = lambda text, history_text: ["iPhone 17"]
+    state = node.process(_required_state("iPhone 17 怎么样", PHONE_VOCABULARY))
+    assert state["item_names"] == []
+    assert not state.get("answer")
+
+
+def test_brand_group_reads_canonical_names_not_aliases(node) -> None:
+    """只比规范名：实测别名里混着 `LPDDR5X`/`NFC` 这类规格噪声，比别名会圈进不相干实体。"""
+    node._call_entity_llm = lambda text, history_text: ["小米"]
+    vocabulary = [{"name": "Redmi K80", "aliases": []}, {"name": "配件手册", "aliases": ["小米手机"]}]
+    state = node.process(_required_state("小米有什么颜色", vocabulary))
+    assert state["item_names"] == ["Redmi K80"], "别名里写不写品牌都不该影响收窄"
+
+
+def test_brand_narrowing_can_be_switched_back_off(node, monkeypatch) -> None:
+    """与 DRIFT_GUARD_DISABLE/IMAGE_ALT_VETO_DISABLE 同族：线上怀疑收窄错了可一键退回旧行为。"""
+    monkeypatch.setenv(BRAND_GROUP_FILTER_DISABLE_ENV, "1")
+    state = node.process(_required_state("有苹果手机吗", PHONE_VOCABULARY))
     assert state["item_names"] == []
     assert not state.get("answer")
 

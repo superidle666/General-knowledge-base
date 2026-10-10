@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
+from backend.app.core.path_utils import slugify
 from backend.app.db.models import Document, ImportTask, Library
 from backend.app.db.session import SessionLocal
 from config.redis_config import redis_config
@@ -148,7 +149,9 @@ class ImportWorker:
                 await self._mark_needs_review(task_id, final_state or {})
                 self.logger.info("导入任务转入人工确认实体：任务=%s", task_id)
             else:
-                self.logger.info("导入任务完成：任务=%s", task_id)
+                # 解析产物不再删除：按知识库分层保留于 processed，便于排查图片描述/切片质量；
+                # 文档删除时再由管理端级联清理。
+                self.logger.info("导入任务完成：任务=%s，解析产物保留于 %s", task_id, state.get("file_dir"))
         finally:
             heartbeat.cancel()
             await asyncio.gather(heartbeat, return_exceptions=True)
@@ -377,7 +380,7 @@ class ImportWorker:
             "entity_recognition_mode": library.entity_recognition_mode or "disabled",
             "config_snapshot": task.config_snapshot or {},
             "import_file_path": str(import_file_path),
-            "file_dir": str(ImportWorker._processed_dir(task.id)),
+            "file_dir": str(ImportWorker._processed_dir(library)),
             "file_title": document.title,
         }
         # 人工确认后重跑：把已确认主实体预置进 state，强制识别节点据此跳过模型。
@@ -392,16 +395,19 @@ class ImportWorker:
         return state
 
     @staticmethod
-    def _processed_dir(task_id: int) -> Path:
-        """一次导入一个解析工作目录：storage/processed/{task_id}。
+    def _processed_dir(library: Library) -> Path:
+        """按知识库分层的解析工作目录：storage/processed/{库ID}-{库名slug}。
 
-        以前所有任务共用 storage/processed 这一层平铺目录：zip 与解压出的 md/图片
-        目录混在一堆，中间产物没有归属，想按任务清理都不知道该删哪些。上传文件名
-        已带 uuid，因此并不会真的互相 rmtree；隔离目录换来的是生命周期：重试同一
-        任务时整体重置自己的目录，而绝碰不到别的任务。
-        task_id 走 int 归一，避免把外部输入拼进路径。
+        两层设计让产物既可读又彼此隔离：
+        - 库ID 前缀防同名库冲突、库改名后不致散落多目录；slug 走 slugify 清洗（去非法字符、
+          折叠空白、截断），便于肉眼辨认归属，同时杜绝把库名里的路径分隔符拼进目录。
+        - “每个上传文件一个独立文件夹”由 node_pdf_to_md 用 pdf_stem 建子目录实现（pdf_stem
+          取自带 uuid 的 storage_key，天然唯一）：zip 落在本目录根，解压产物落在 {pdf_stem}/
+          子目录，重试时节点自行清空同名子目录，互不干扰。
+        解析产物在导入成功后不再删除，保留以便排查图片描述与切片质量；文档删除时由管理端级联清理。
         """
-        return ImportWorker._resolve_project_path(f"storage/processed/{int(task_id)}")
+        folder = f"{library.id}-{slugify(library.name)}"
+        return ImportWorker._resolve_project_path(f"storage/processed/{folder}")
 
     @staticmethod
     def _resolve_project_path(value: str) -> Path:

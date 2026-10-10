@@ -73,4 +73,6 @@ export type UserSource = {
   kind?: 'local' | 'web'
   url?: string | null
   siteName?: string | null
+  // 本条来源由精排阶段合并的碎片组成时的段数（>=2）；没合并时为 null
+  mergedParts?: number | null
 }
