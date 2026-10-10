@@ -8,6 +8,8 @@ export type QueryRequest = {
   library_id: number
   query: string
   session_id?: string
+  // 可缺省：不传即按后端 DEFAULT_TOP_K（当前 10）给。调用方不得写死数字，否则服务端抬宽证据
+  // 窗口时会被前端这个常量钉回原样（来源面板本来就按 sources.length 渲染，前端无需知道条数）
   top_k?: number
   // HyDE 不在请求体里：它由知识库管理端按库配置，用户端不感知也不可选
   use_web_search?: boolean

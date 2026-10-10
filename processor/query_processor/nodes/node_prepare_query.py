@@ -48,7 +48,7 @@ from processor.query_processor.prompt.entity_extract import (
     ENTITY_EXTRACT_SYSTEM,
     build_entity_extract_prompt,
 )
-from processor.query_processor.state import QueryGraphState
+from processor.query_processor.state import DEFAULT_TOP_K, QueryGraphState
 from tool.logger import logger
 from utils.entity_patterns import (
     brand_group_of,
@@ -198,7 +198,9 @@ class NodePrepareQuery(NodeBase):
         state["use_hyde"] = bool(state.get("use_hyde", False))
         state["use_web_search"] = bool(state.get("use_web_search", False))
         state["retrieval_top_k"] = int(state.get("retrieval_top_k") or 20)
-        state["top_k"] = int(state.get("top_k") or 5)
+        # top_k 的缺省只住在 DEFAULT_TOP_K 一处：接口不传、脚本直调工作流、旧会话回放都走它，
+        # 不在此处再写一遍数字（多处各自演进的后果不是报错，而是候选预算与出口窗口用了两个不同的缺省值）。
+        state["top_k"] = int(state.get("top_k") or DEFAULT_TOP_K)
         # 元指令与对话回指（R9-B）：这类输入的话题是“这段对话本身”，拿字面串检索必然零召回。
         # 必须排在闲聊闸**之前**：“继续”“换个说法”短而无实体信号，正好落在闲聊 L2 的门禁里，
         # 先过闲聊闸会被小模型判成闲聊并预置固定回复，用户要的“再来一版”就永远出不来。

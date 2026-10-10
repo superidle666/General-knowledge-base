@@ -19,6 +19,7 @@ from processor.query_processor.nodes.node_rerank import (
     RERANK_MAX_TOPK,
     NodeRerank,
 )
+from processor.query_processor.state import DEFAULT_TOP_K
 import utils.reranker_http_utils as reranker_module
 from utils.reranker_http_utils import RerankError, rerank_documents
 
@@ -129,12 +130,23 @@ def _docs(count: int, prefix: str, content: str = "内容") -> list[dict]:
         (1, (RERANK_MAX_TOPK, 3)),      # 小 top_k 也不许削召回：候选不得少于断崖输出上限
         (5, (15, 5)),
         (20, (30, 10)),                 # 客户端放大 top_k 时由绝对上限兜住成本
-        ("abc", (15, 5)),               # 非法值退回默认 5
-        (None, (15, 5)),
     ],
 )
 def test_candidate_limits(top_k: Any, expected: tuple[int, int]) -> None:
     assert NodeRerank._candidate_limits({"top_k": top_k}) == expected
+
+
+@pytest.mark.parametrize("bad", [None, 0, "", "abc"])
+def test_invalid_or_missing_top_k_equals_the_single_default(bad: Any) -> None:
+    """非法值与缺省值必须算出同一份预算。
+
+    这两组本来写成 (15, 5) 的字面量，等于把“缺省就是 5 条”悄悄钉进了测试。缺省抬到
+    DEFAULT_TOP_K 后它们不会提示“口径错了”，只会报“期望 15 实际 30”，看不出真正要保的性质：
+    非法输入应该等价于“没传”，而不是等价于某个具体数字。改成与缺省值直接对比，
+    默认值再怎么调都不必跟着改这里。
+    """
+    assert NodeRerank._candidate_limits({"top_k": bad}) == NodeRerank._candidate_limits({"top_k": DEFAULT_TOP_K})
+    assert NodeRerank._final_window_cap({"top_k": bad}) == NodeRerank._final_window_cap({"top_k": DEFAULT_TOP_K})
 
 
 def test_only_capped_candidates_reach_the_reranker(monkeypatch: pytest.MonkeyPatch) -> None:

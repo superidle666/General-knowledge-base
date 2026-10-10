@@ -438,7 +438,9 @@ async function sendMessage() {
         library_id: libraryId,
         query: text,
         session_id: currentSessionId.value || undefined,
-        top_k: 5,
+        // 不传 top_k：读几条、展示几条由后端默认值统一决定。此前这里写死 5，等于把服务端的
+        // 证据宽度按前端一个没人维护的常量钉住（抬到 10 也只会拿到 5），且来源条数变了
+        // 也无需改前端——展示就是按接口返回的 sources 实际长度渲染的。
         use_web_search: useWebSearch.value,
       },
       (delta) => {

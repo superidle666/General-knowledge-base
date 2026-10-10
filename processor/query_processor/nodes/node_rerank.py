@@ -9,7 +9,7 @@ import re
 from typing import Dict, Any, List
 
 from processor.query_processor.base import NodeBase
-from processor.query_processor.state import QueryGraphState
+from processor.query_processor.state import DEFAULT_TOP_K, QueryGraphState
 from processor.query_processor.topic_consistency import GUARD_DISABLE_ENV, align_window_to_topic
 from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
@@ -203,9 +203,9 @@ class NodeRerank(NodeBase):
         但它仍要与本地同场竞价，所以也留个最低条数避免被一两条搜索结果的顺序定死。
         """
         try:
-            top_k = int(state.get('top_k') or 5)
+            top_k = int(state.get('top_k') or DEFAULT_TOP_K)
         except (TypeError, ValueError):
-            top_k = 5
+            top_k = DEFAULT_TOP_K
         top_k = max(1, top_k)
         local_limit = max(
             RERANK_MAX_TOPK,
@@ -218,13 +218,14 @@ class NodeRerank(NodeBase):
     def _final_window_cap(state: QueryGraphState) -> int:
         """最终喂模型/展示的来源条数上限：以用户 top_k 封顶、夹在 [RERANK_MIN_TOPK, RERANK_MAX_TOPK]。
 
-        Phase3 决策1a：出口宽度不再与 top_k 脱钩（以前恒 = RERANK_MAX_TOPK）。top_k 缺省按 5
-        （与接口/前端默认一致）；再小也保底 RERANK_MIN_TOPK，避免收窄到断崖无段可看。
+        Phase3 决策1a：出口宽度不再与 top_k 脱钩（以前恒 = RERANK_MAX_TOPK）。top_k 缺省按
+        DEFAULT_TOP_K（与接口默认同一口径，不再在本文件里拄一遍数字）；再小也保底
+        RERANK_MIN_TOPK，避免收窄到断崖无段可看。
         """
         try:
-            top_k = int(state.get('top_k') or 5)
+            top_k = int(state.get('top_k') or DEFAULT_TOP_K)
         except (TypeError, ValueError):
-            top_k = 5
+            top_k = DEFAULT_TOP_K
         return max(RERANK_MIN_TOPK, min(top_k, RERANK_MAX_TOPK))
 
     @classmethod

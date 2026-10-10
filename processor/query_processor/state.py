@@ -8,6 +8,13 @@ processor/query_processor/state.py
 
 from typing import TypedDict, List
 
+# 来源宽度的唯一默认值。请求不传 top_k、接口层缺省、以及任何节点在 state 里读不到 top_k 时，
+# 都落到这一个常量上。改之前这个 5 抄在了四个节点和接口 schema 里各写一遍，抬一档要同时改
+# 五处，而漏改任何一处的表现不是报错，是“候选按 10 条预算取、窗口只给 5 条”这种口径漂移 ——
+# 比默认值取多少难得多发现。上界另由 node_rerank.RERANK_MAX_TOPK 兜住（防客户端把 top_k
+# 放大后精排成本与来源面板长度失控），所以这里给到 10 就等于“默认读满允许的证据宽度”。
+DEFAULT_TOP_K: int = 10
+
 class QueryGraphState(TypedDict, total=False):
     """
     查询流程图状态
@@ -19,7 +26,7 @@ class QueryGraphState(TypedDict, total=False):
 
     original_query: str  # 用户原始问题
     library_id: int  # 当前检索知识库 ID
-    top_k: int  # 最终返回来源数量
+    top_k: int  # 最终返回来源数量（缺省见 DEFAULT_TOP_K，夹在 RERANK_MIN_TOPK 与 RERANK_MAX_TOPK 之间）
     retrieval_top_k: int  # Milvus 初始召回数量
     use_hyde: bool  # 是否启用 HyDE 检索
     use_web_search: bool  # 是否启用联网检索

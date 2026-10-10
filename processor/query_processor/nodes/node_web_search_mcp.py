@@ -12,7 +12,7 @@ from agents.mcp import MCPServerStreamableHttp
 
 from config.bailian_mcp_config import mcp_config
 from processor.query_processor.base import NodeBase
-from processor.query_processor.state import QueryGraphState
+from processor.query_processor.state import DEFAULT_TOP_K, QueryGraphState
 from tool.logger import configure_logging, logger
 from utils.json_format_utils import serialize_json
 
@@ -65,7 +65,7 @@ class NodeWebSearchMcp(NodeBase):
     @staticmethod
     def _resolve_count(state: QueryGraphState) -> int:
         """搜索条数跟着 top_k 走并留出重排余量，避免与用户可配的来源数量两套口径。"""
-        top_k = int(state.get("top_k") or 5)
+        top_k = int(state.get("top_k") or DEFAULT_TOP_K)
         return max(min(top_k * 2, MCP_MAX_RESULT_COUNT), 1)
 
     @staticmethod

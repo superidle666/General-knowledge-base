@@ -12,6 +12,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# 只从 state.py（它不携带任何检索依赖）拿缺省值：接上 node_rerank 会把 dashscope/config 一路拉到
+# 导入期，而 schemas 是被 OpenAPI 生成、接口注册等路径共享的纯声明层，不能在它导入时读环境变量。
+from processor.query_processor.state import DEFAULT_TOP_K
+
 
 def normalize_file_size_limit(value: object) -> object:
     """按整数 MB 保存文件大小限制，小数统一向上取整。"""
@@ -364,7 +368,11 @@ class QueryRequest(BaseModel):
     library_id: int = Field(ge=1)
     query: str = Field(min_length=1, max_length=4000)
     session_id: str | None = Field(default=None, max_length=128)
-    top_k: int = Field(default=5, ge=1, le=10)
+    # top_k 默认与出口窗口共用 DEFAULT_TOP_K（前端不再传这个字段，否则前后端各一份默认值
+    # 会把“该给几条”变成两个口径）。上限 10 是接口契约，与 node_rerank.RERANK_MAX_TOPK 同值：
+    # 那个常量住在重排节点里，schemas 引入它会把精排 SDK 与配置加载拖进导入期，所以留在本地，
+    # 改动时必须两处一起抬（只抬一处会得到“接口收得到但窗口取不满”或反向的不一致）。
+    top_k: int = Field(default=DEFAULT_TOP_K, ge=1, le=10)
     # HyDE 不在请求体里：它会多一次大模型调用并抬高时延，用户也无法判断开关收益，
     # 因此统一由知识库规则决定（见 Library.use_hyde），接口层注入工作流状态。
     use_web_search: bool = False
