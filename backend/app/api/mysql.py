@@ -510,6 +510,10 @@ async def create_library(
     """
     if payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
         raise HTTPException(403, "实体识别模式仅管理员可设置")
+    # 确认闸的严格程度沿用同一个权限口径：默认值是 strict（最严那一档），往宽松改就是给误答开口子，
+    # 而能把实体识别设成 required 的本来也只有管理员。
+    if payload.entity_confirm_mode != "strict" and not current_user.is_system_admin:
+        raise HTTPException(403, "实体确认严格程度仅管理员可调整")
     validate_library_rules(payload.model_dump())
     library = Library(**payload.model_dump())
     session.add(library)
@@ -532,6 +536,8 @@ async def update_library(
     """
     if payload.entity_recognition_mode is not None and payload.entity_recognition_mode != "disabled" and not current_user.is_system_admin:
         raise HTTPException(403, "实体识别模式仅管理员可设置")
+    if payload.entity_confirm_mode is not None and payload.entity_confirm_mode != "strict" and not current_user.is_system_admin:
+        raise HTTPException(403, "实体确认严格程度仅管理员可调整")
     library = await get_or_404(session, Library, library_id, "知识库")
     values = payload.model_dump(exclude_unset=True)
     validate_library_rules({"entity_recognition_mode": library.entity_recognition_mode, **values})

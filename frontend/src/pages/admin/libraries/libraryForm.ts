@@ -9,6 +9,8 @@ import type { Library } from '../../../api/mysql'
 
 /** 实体识别模式取值（与后端 entity_recognition_mode 对齐）。 */
 export type EntityRecognitionMode = Library['entity_recognition_mode']
+/** 实体确认闸严格程度取值（与后端 entity_confirm_mode 对齐）。 */
+export type EntityConfirmMode = Library['entity_confirm_mode']
 /** 知识库可见性取值。 */
 export type LibraryVisibility = Library['visibility']
 
@@ -18,6 +20,7 @@ export type LibraryForm = {
   code: string
   description: string
   entityMode: EntityRecognitionMode
+  entityConfirmMode: EntityConfirmMode
   allowedFileTypes: string[]
   maxFileSizeMb: number | undefined
   maxDocumentCount: number | undefined
@@ -32,6 +35,16 @@ export type LibraryForm = {
 export const ALL_ENTITY_MODE_OPTIONS: Array<{ label: string; value: EntityRecognitionMode }> = [
   { label: '不启用实体识别', value: 'disabled' },
   { label: '强制实体识别', value: 'required' },
+]
+
+/**
+ * 实体确认严格程度下拉选项（只对“强制实体识别”的库起作用）。
+ * 文案写成用户能看懂的后果，而不是 strict/lenient 这两个字：选错一档的表现是
+ * “本该问一句却直接答了”，光看标签名看不出来。
+ */
+export const ALL_ENTITY_CONFIRM_OPTIONS: Array<{ label: string; value: EntityConfirmMode }> = [
+  { label: '严格：确认不了型号就先问一句', value: 'strict' },
+  { label: '宽松：只按型号筛选，不反问', value: 'lenient' },
 ]
 
 /** 允许文件类型下拉选项。 */
@@ -53,6 +66,8 @@ export function emptyLibraryForm(): LibraryForm {
     code: '',
     description: '',
     entityMode: 'disabled',
+    // 新建库默认最严那一档：往宽松改等于给误答开口子，得管理员显式做这个决定
+    entityConfirmMode: 'strict',
     allowedFileTypes: ['pdf', 'md'],
     maxFileSizeMb: undefined,
     maxDocumentCount: undefined,
@@ -73,6 +88,7 @@ export function libraryToForm(library: Library): LibraryForm {
     code: library.code,
     description: library.description || '',
     entityMode: library.entity_recognition_mode,
+    entityConfirmMode: library.entity_confirm_mode || 'strict',
     allowedFileTypes: [...(library.allowed_file_types || ['pdf', 'md'])],
     maxFileSizeMb: library.max_file_size_mb || undefined,
     maxDocumentCount: library.max_document_count || undefined,
@@ -121,6 +137,8 @@ export function libraryFormToPayload(
     code: opts.code ?? form.code.trim(),
     description: form.description.trim() || null,
     ...(opts.isAdmin ? { entity_recognition_mode: form.entityMode } : {}),
+    // 确认闸沿用同一个权限口径（后端也只允许管理员往宽松改）；不提交时后端按默认 strict 落
+    ...(opts.isAdmin ? { entity_confirm_mode: form.entityConfirmMode } : {}),
     allowed_file_types: form.allowedFileTypes.length ? form.allowedFileTypes : null,
     max_file_size_mb: form.maxFileSizeMb || null,
     max_document_count: form.maxDocumentCount || null,

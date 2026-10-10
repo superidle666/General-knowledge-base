@@ -137,6 +137,11 @@ class Library(TimestampMixin, SoftDeleteMixin, Base):
     document_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_by: Mapped[int | None] = mapped_column(ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True)
     entity_recognition_mode: Mapped[str] = mapped_column(String(20), default="disabled", server_default="disabled", nullable=False)
+    # 实体确认闸的严格程度（阶段一）。只在 entity_recognition_mode=required 时起作用：
+    # strict = 确认不了型号就先问一句，lenient = 只筛选不反问（改造前行为）。
+    # 做成库级而不是全局：同一个决定在单款库是明知故问、在十款库是要列十个候选，
+    # 而知识库之间不能跳库检索，所以上一层根本没有“全局”的意义（默认严格）。
+    entity_confirm_mode: Mapped[str] = mapped_column(String(20), default="strict", server_default="strict", nullable=False)
     allowed_file_types: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     max_file_size_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_document_count: Mapped[int | None] = mapped_column(Integer, nullable=True)

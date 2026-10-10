@@ -69,6 +69,14 @@ EXIT_LABELS: dict[str, str] = {
     "empty_vocab": "本库词表为空 → 不带过滤裸搜",
     "not_required": "非 required 库（对照组）",
     "pre_gated": "前置闸或参数校验短路",
+    # 阶段一严格档新增七格（与 ENTITY_ALIGN_EXITS 同步，增删必须两处一起改）
+    "clarify_answered": "闭环：回答了上一轮的反问 → 确认并继承谓词",
+    "unlisted_brand": "本库未收录的品牌 → 直说未收录",
+    "unlisted_model": "品牌本库有、那一代查无 → 不带过滤裸搜（不替用户换型号）",
+    "multi_mention_defer": "一句里点了两个本库型号却只上一个 → 不收窄",
+    "confirm_clarify": "这句没写出型号 → 列本库名单问一句",
+    "single_product_narrowed": "本库只收录一款且这句没型号 → 直接收窄到那款",
+    "degraded_answer": "已到反问上限 → 不再问，退成不带过滤裸搜",
 }
 
 # 多轮意图的识别词：命中却没有可机读的"上一轮"时，绝不把该条当单轮跑（那样出口会假性
@@ -196,13 +204,21 @@ def _attach_prefix(case: Case, cells: list[str], prefix_col: int | None) -> None
 # ----------------------------------------------------------------------
 
 def build_param_owners(folder: Path) -> dict[str, set[str]]:
+    """数值 → 归属机型。
+
+    指纹从**整篇出现过的所有毫安时数字**取，不只 FAQ 的典型值：第二轮实跑里答案引了
+    「标称最小值 3190」（归 iPhone 15 Pro），只抽典型值就把这种同篇数值记成「归属未知」，
+    机检于是虚报。归属仍由该篇 FAQ 的规范名决定（模板保证每篇都有这一句）。
+    """
     owners: dict[str, set[str]] = {}
     for doc_path in sorted(folder.glob("*.md")):
         if doc_path.name.lower() in {"cases.md", "readme.md"}:
             continue
         text = doc_path.read_text(encoding="utf-8")
-        for entity_name, value in BATTERY_FAQ_PATTERN.findall(text):
-            owners.setdefault(value, set()).add(entity_name.strip())
+        faq_rows = BATTERY_FAQ_PATTERN.findall(text)
+        entity_name = faq_rows[0][0].strip() if faq_rows else doc_path.stem
+        for value in ANSWER_MAH_PATTERN.findall(text):
+            owners.setdefault(value, set()).add(entity_name)
     return owners
 
 
@@ -216,6 +232,19 @@ def _cited_params(answer: str, owners: dict[str, set[str]]) -> list[str]:
         if item not in cited:
             cited.append(item)
     return cited
+
+
+MODEL_CORE_PATTERN = re.compile(r"\d+[a-z]*")
+
+
+def _model_signature(text: str) -> set[str]:
+    """抽“型号内核”：每串数字 + 紧跟其后的字母（iphone15pro → 15pro，ace6t → 6t）。
+
+    包含匹配对「苹果15pro vs iphone15pro」这种中文品牌前缀永远失效（两边没共同子串），
+    但它们的内核是同一个 15pro。第二轮实跑里就是这一形被误报成疑似串款。
+    只看数字不只看整串是取舍：15 与 15pro 内核不同，因此能分开“报了基款”与“报了 Pro”。
+    """
+    return set(MODEL_CORE_PATTERN.findall(text))
 
 
 def _matchable(surface: str) -> bool:
@@ -264,6 +293,16 @@ def _suspect_cross_model(answer: str, mentions: list[str], owners: dict[str, set
         if any(token in holder or holder in token
                for token in named if _matchable(token)):
             return False
+    # 子串对不上不代表串款：中文品牌前缀（苹果15pro）与英文实体名（iphone15pro）
+    # 本就没共同子串，再用型号内核比一次，对得上就不算疑似。
+    named_core: set[str] = set()
+    for token in named:
+        named_core.update(_model_signature(token))
+    holder_core: set[str] = set()
+    for holder in holders:
+        holder_core.update(_model_signature(holder))
+    if named_core & holder_core:
+        return False
     return True
 
 
@@ -357,6 +396,8 @@ async def load_library_config(library_id: int) -> dict:
             "library_name": str(library.name),
             "use_hyde": bool(library.use_hyde),
             "entity_recognition_mode": mode,
+            # 库级确认闸严格程度：探针跑的就是线上那一档，不在脚本里自己另定默认值
+            "entity_confirm_mode": str(library.entity_confirm_mode or "strict"),
             "entity_vocabulary": vocabulary,
             "document_status": {str(status): int(count) for status, count in status_rows},
             "entity_source": {
@@ -387,6 +428,7 @@ def run_single_turn(
         "use_hyde": library_config["use_hyde"],
         "use_web_search": False,  # 探针只看本库实体链路，不放外网变量进来
         "entity_recognition_mode": library_config["entity_recognition_mode"],
+        "entity_confirm_mode": library_config.get("entity_confirm_mode") or "strict",
         "entity_vocabulary": library_config["entity_vocabulary"],
         "is_stream": False,
         "persist_history": False,
@@ -453,9 +495,15 @@ def probe_case(
                 "topic_align_log": [line for line in capture.lines if "话题一致性" in line],
             })
             # 真实连续对话的形状：把刚发生的问答原样接回历史，不做任何美化
+            # `clarify_candidates` 也必须接上：接口层就是把它写进助手消息的，少了它
+            # 三轮链的第二轮（回答反问）在探针里永远认不出来，闭环就只在线上验得到
             history = history + [
                 {"role": "user", "text": prefix_question},
-                {"role": "assistant", "text": warm_answer},
+                {
+                    "role": "assistant",
+                    "text": warm_answer,
+                    "clarify_candidates": [str(c) for c in warm.get("entity_clarify_candidates") or []],
+                },
             ]
         capture.lines.clear()  # 目标轮的日志只留自己那一段
         started = time.perf_counter()
@@ -478,6 +526,9 @@ def probe_case(
         "mentions": mentions,
         "item_names": list(state.get("item_names") or []),
         "prefix_exits": prefix_exits,
+        # 本轮列出的反问候选与上一轮候选：三轮链判读靠这两列（反问→回答是否接得上）
+        "clarify_candidates": list(state.get("entity_clarify_candidates") or []),
+        "confirm_mode": str(signals.get("confirm_mode") or ""),
         "elapsed_ms": elapsed_ms,
         "stop_reason": str(state.get("stop_reason") or ""),
         # 坑1：出口标着 hit_exact，但过滤其实是放宽后才召回到内容的 —— 必须由这两列拆穿
@@ -588,6 +639,17 @@ def write_report(out_path: Path, records: list[dict], folder_name: str, library_
             "中文品牌名与实体名没有共同子串（苹果 vs iPhone 15），而它们引用多款数值本就是期望行为；"
             "要查的是“有没有随机挑一款当唯一答案”，到下面标注表看"
         )
+    # 零疑似不等于零问题：机检只看“电池数值归归属”，而相当一批条的答案里根本没有电池数值。
+    blind = [
+        record for record in judged
+        if record.get("exit") in ("hit_exact", "brand_narrowed", "single_candidate")
+        and not record.get("cited_params")
+    ]
+    lines.append(
+        f"　机检覆盖边界：只比“点名型号 ↔ 答案里引用的库内电池数值”。本库有 **{len(blind)} 条收窄成功但答案没引电池数值**"
+        "（问的是重量/保修/存储/协议），机检对它们零信号；两款都点名时的**数值互换**（把 A 的参数安到 B 头上）"
+        "机检也判不出——这两类正是实测里真正出的错，必须逐条看下面的标注表，不能看见“无疑似”就收工"
+    )
     lines += [
         "",
         "## 待人工标注",

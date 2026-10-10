@@ -3,8 +3,9 @@
  * @Author: 项目维护者
  * @Date: 2026-09-28
  * @Description: 知识库详情页「配置」Tab：当前库规则表单与保存、停用/启用、删除操作。
- * @BusinessRule: 实体识别模式仅 admin 可编辑；存在文档时禁止删除知识库；字段与校验口径见 libraryForm.ts；
- *   实体识别模式变更只在“影响已有文档”时用 confirmDialog 二次确认，文案里的份数来自 entity-coverage 接口。
+ * @BusinessRule: 实体识别模式与实体确认严格程度仅 admin 可编辑；存在文档时禁止删除知识库；字段与校验口径见 libraryForm.ts；
+ *   实体识别模式变更只在“影响已有文档”时用 confirmDialog 二次确认，文案里的份数来自 entity-coverage 接口；
+ *   实体确认严格程度保存即生效（不追溯文档），只在往宽松方向改时二次确认。
 -->
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
@@ -14,6 +15,7 @@ import { USER_ROLE } from '../../../constants'
 import { useUserStore } from '../../../store/modules/user'
 import { confirmDialog } from '../../../utils/confirm'
 import {
+  ALL_ENTITY_CONFIRM_OPTIONS,
   ALL_ENTITY_MODE_OPTIONS,
   FILE_TYPE_OPTIONS,
   VISIBILITY_OPTIONS,
@@ -22,6 +24,7 @@ import {
   libraryToForm,
   normalizeMaxFileSize,
   validateLibraryForm,
+  type EntityConfirmMode,
   type EntityRecognitionMode,
   type LibraryForm,
 } from './libraryForm'
@@ -36,6 +39,15 @@ const isSystemAdmin = computed(() => userStore.userInfo?.roles.includes(USER_ROL
 const entityModeOptions = computed(() => (isSystemAdmin.value ? ALL_ENTITY_MODE_OPTIONS : [ALL_ENTITY_MODE_OPTIONS[0]]))
 
 const form = ref<LibraryForm>(libraryToForm(props.library))
+
+/** 确认闸只对“强制实体识别”的库有语义：未启用实体识别时这一档根本不会被读到。 */
+const confirmGateEnabled = computed(() => form.value.entityMode === 'required')
+const entityConfirmOptions = ALL_ENTITY_CONFIRM_OPTIONS
+const entityConfirmHint = computed(() =>
+  form.value.entityConfirmMode === 'strict'
+    ? '严格档：问句里认不出是哪个型号时，先回一句“您想问哪一款”，用户答上来再继续；单款库不会反问，直接收窄到那款。'
+    : '宽松档：不反问，认不出型号就直接按不带实体过滤的方式检索作答（改造前的行为），多份文档里的同名参数有串味风险。',
+)
 const saving = ref(false)
 const deleting = ref(false)
 const changingStatus = ref(false)
@@ -94,6 +106,17 @@ function entityModeChangeWarning(nextMode: EntityRecognitionMode) {
   return `关闭后本库问答不再按实体收窄检索范围，多文档之间的同名参数可能互相串味。${keepNote}确定关闭吗？`
 }
 
+/** 确认闸往宽松改的代价文案；无需提示时返空串。 */
+function entityConfirmChangeWarning(nextMode: EntityConfirmMode, nextEntityMode: EntityRecognitionMode) {
+  // 只有“强制识别 + 宽松”这个组合才真的放开风险；往严格改不需要确认
+  if (nextMode !== 'lenient' || nextEntityMode !== 'required') return ''
+  if (props.library.entity_confirm_mode === 'lenient') return ''
+  return (
+    '切换后立即生效（不需要重新导入）：本库问答不再因为认不出型号而反问，' +
+    '而是直接按不带实体过滤的方式检索，存在把另一款的参数当成本款回答的风险。确定切换吗？'
+  )
+}
+
 // 壳层刷新库数据后重新回填表单（保存成功/状态切换后保持展示与后端一致）。
 watch(
   () => props.library,
@@ -129,6 +152,18 @@ async function saveLibrary() {
         confirmText: '仍然保存',
       })
       // 取消时不提交也不回滚表单：管理员可以先去文档 Tab 重跑，回来再保存。
+      if (!confirmed) return
+    }
+  }
+  // 确认闸的切换不追溯文档、保存即生效，所以只把“放开反问”这个方向的代价说清楚。
+  if (isSystemAdmin.value && form.value.entityConfirmMode !== props.library.entity_confirm_mode) {
+    const warning = entityConfirmChangeWarning(form.value.entityConfirmMode, form.value.entityMode)
+    if (warning) {
+      const confirmed = await confirmDialog({
+        header: '切换实体确认严格程度',
+        body: warning,
+        confirmText: '仍然保存',
+      })
       if (!confirmed) return
     }
   }
@@ -214,6 +249,17 @@ async function deleteLibrary() {
         <small v-else-if="isSystemAdmin && entityCoverageNote" class="library-switch-hint">{{
           entityCoverageNote
         }}</small>
+      </div>
+      <div class="library-field">
+        <t-select
+          v-model="form.entityConfirmMode"
+          :options="entityConfirmOptions"
+          :disabled="!isSystemAdmin || !confirmGateEnabled"
+          label="实体确认严格程度"
+        /><small v-if="!confirmGateEnabled" class="library-switch-hint">
+          仅“强制实体识别”的知识库生效；当前未启用实体识别，这一项不起作用。
+        </small>
+        <small v-else class="library-switch-hint">{{ entityConfirmHint }}</small>
       </div>
       <div class="library-field">
         <t-select

@@ -178,3 +178,62 @@ def brand_groups_in_mentions(mentions: list[str]) -> list[str]:
         if label and label not in labels:
             labels.append(label)
     return labels
+
+
+# ---------------------------------------------------------------------------
+# 四、确认闸用的另外三份判据（阶段一：未收录品牌、协议词、数字系列号）
+# ---------------------------------------------------------------------------
+
+# 协议/能力版本号词干：`wifi7`、`pps1.2`、`蓝牙 5.3`、`ip68` 这类串与型号形状完全一样，但没有一款产品叫这个名。
+# 为什么必须用黑名单而不是相似度/阈值：阶段零实测里，要防的协议词最高分 0.5711（`蓝牙 5.3` → `iPhone 15`），
+# 而真变体的最低分是 0.5290——**两个分数带是重叠的**，拍任何一条切线都会同时误杀真变体、误纳协议词。
+# 表外写法只是少排一个（退成"当成型号提及"），不会造成错答，所以宁少勿误：
+# 短到会撞上真实型号名的词干（`p3`、`bd`、`ik`、`nl`、`pe`、`apt`）一律不进表。
+PROTOCOL_STEMS: tuple[str, ...] = (
+    "wifi", "bluetooth", "蓝牙", "nfc", "irda", "airplay", "carplay", "dlna",
+    "pps", "qc", "afc", "pd", "ufs", "emmc", "ssd", "nvme", "sata", "pcie", "ddr", "lpddr",
+    "hdmi", "mipi", "usb", "typec", "otg", "thunderbolt", "lightning",
+    "ldac", "aptx", "sbc", "aac", "opus", "lpcm", "dolby", "dts", "hires",
+    "gps", "galileo", "glonass", "qzss", "navic", "uwb", "ble", "zigbee", "thread", "matter",
+    "esim", "tdma", "cdma", "lte", "volte", "wcdma",
+    "ip", "ois", "eis", "srgb", "vrr", "freesync", "gsync", "hdr",
+    "ios", "ipados", "macos", "windows", "android", "harmonyos", "miui", "coloros", "originos",
+    "emui", "magicos", "linux", "ubuntu", "python", "directx", "opengl", "vulkan", "webgl",
+)
+
+# 整个提及就是"词干 + 版本号"才算协议词：子串匹配会把 `A1206`、`iPad 10` 这类真型号一起否掉
+# （`ip` 是词干，但 `ipad 10` 里 `ip` 后面接的是字母，正则要的是分隔符或直接跟数字）。
+PROTOCOL_TOKEN_PATTERN = re.compile(
+    rf"^(?:{_alternation(PROTOCOL_STEMS)})[\s\-_.]*[0-9]+(?:[._:][0-9]+)*[a-z0-9]?$",
+    re.IGNORECASE,
+)
+
+
+def is_protocol_or_spec_token(text: object) -> bool:
+    """这串是个协议/能力版本号而不是型号吗（整串匹配，不做子串）。
+
+    命中就等于"这句本轮其实没点名任何产品"：确认闸会把它当"没提取到实体"处理
+    （单款库直接收窄、多款库先问），而不是拿 `wifi7` 去跟名单做模糊比对。
+    光秃秃一个词干（`蓝牙`、`nfc`）也算：那是在问能力，不是在点型号。
+    """
+    normalized = str(text or "").strip().casefold().replace(" ", "")
+    if not normalized:
+        return False
+    if normalized in PROTOCOL_STEMS:
+        return True
+    return bool(PROTOCOL_TOKEN_PATTERN.match(normalized))
+
+
+def digit_runs(text: object) -> list[str]:
+    """取出文本里的连续数字串（`iPhone 15 Pro` → ['15']，`DBY-W09` → ['09']）。
+
+    确认闸靠它区分两件完全不同的事：`苹果15` 库里有 iPhone 15/15 Pro 是**同族歧义**（该问），而 `iPhone 17`
+    库里只有 18 是**未收录**（绝不能替用户把 17 换成 18——这条老规矩由 R7 立着，本函数把它接到新闸上）。
+    """
+    return re.findall(r"[0-9]+", str(text or ""))
+
+
+def brand_groups_of_names(names: object) -> set[str]:
+    """本库名单覆盖哪些品牌组（空串丢弃）。未收录品牌前置否决拿它当"本库认识的牌子全集"。"""
+    return {label for label in (brand_group_of(name) for name in (names or [])) if label}
+

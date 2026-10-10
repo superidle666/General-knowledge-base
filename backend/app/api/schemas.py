@@ -178,6 +178,8 @@ class LibraryCreate(BaseModel):
 
 
     entity_recognition_mode: str = Field(default="disabled", pattern="^(disabled|required)$")
+    # 实体确认闸的严格程度（只在 required 库起作用）：strict 先问一句，lenient 只筛选不反问
+    entity_confirm_mode: str = Field(default="strict", pattern="^(strict|lenient)$")
     allowed_file_types: list[str] | None = None
     max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
     max_document_count: int | None = Field(default=None, ge=1)
@@ -200,6 +202,7 @@ class LibraryUpdate(BaseModel):
 
 
     entity_recognition_mode: str | None = Field(default=None, pattern="^(disabled|required)$")
+    entity_confirm_mode: str | None = Field(default=None, pattern="^(strict|lenient)$")
     allowed_file_types: list[str] | None = None
     max_file_size_mb: int | None = Field(default=None, ge=1, le=10240)
     max_document_count: int | None = Field(default=None, ge=1)
@@ -223,6 +226,7 @@ class LibraryOut(BaseModel):
     cover_color: str | None
     status: str
     entity_recognition_mode: str
+    entity_confirm_mode: str
     allowed_file_types: list[str] | None
     max_file_size_mb: int | None
     max_document_count: int | None

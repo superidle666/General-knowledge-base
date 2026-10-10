@@ -27,6 +27,12 @@ export type Library = {
   updated_at: string
   deleted_at: string | null
   entity_recognition_mode: 'disabled' | 'required'
+  /**
+   * 实体确认闸的严格程度（只在 required 库起作用）：strict 确认不了型号就先问一句，
+   * lenient 只筛选不反问（改造前的老行为）。做成库级而不是全局，是因为知识库之间
+   * 不能跳库检索，上一层根本没有“全局默认”的意义；默认 strict。
+   */
+  entity_confirm_mode: 'strict' | 'lenient'
   allowed_file_types: string[] | null
   max_file_size_mb: number | null
   max_document_count: number | null

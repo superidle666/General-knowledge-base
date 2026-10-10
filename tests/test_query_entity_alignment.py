@@ -21,6 +21,7 @@ from processor.query_processor.nodes.node_prepare_query import (
 
 QUERY_STATE = PROJECT_ROOT / "processor" / "query_processor" / "state.py"
 API_QUERY = PROJECT_ROOT / "backend" / "app" / "api" / "query.py"
+API_HISTORY = PROJECT_ROOT / "utils" / "mongo_history_utils.py"
 
 
 def _required_state(query: str, vocabulary: list[dict]) -> dict:
@@ -237,11 +238,23 @@ def test_hyphenated_model_code_matches_hyphen_free_vocabulary_name(node) -> None
     assert state["item_names"] == ["hak180产品安全手册"]  # 回填规范名原样串，供 Milvus 字面命中
 
 
-def test_required_without_any_mention_falls_back_to_unfiltered(node) -> None:
-    # 抽不到实体时不臆断也不拒答：不带过滤继续检索，避免误伤泛问题
+def test_required_without_any_mention_narrows_single_product_library(node) -> None:
+    """严格档第五档（已拍板）：本库只收录一款时，属性追问不再退裸搜，直接收窄到那款。
+
+    改造前这里是 `item_names == []`（抽不到实体就退回不带过滤检索）。单款库里本来就只有一个
+    对象，继续搜等于把“能不能收窄”交给生成阶段猜，而库里只有一篇时它根本猜不错。
+    """
     state = node.process(_required_state("怎么连接电源适配器", [{"name": "HAK-180", "aliases": []}]))
+    assert state["item_names"] == ["HAK-180"]
+    assert not state.get("answer")  # 收窄不是反问也不是拒答
+
+
+def test_required_without_any_mention_asks_when_library_has_several(node) -> None:
+    """多款库同一句泛问题：拿不准是哪个对象就问一句（候选清单会落到会话历史供下一轮认）。"""
+    state = node.process(_required_state("怎么连接电源适配器", PHONE_VOCABULARY))
     assert state["item_names"] == []
-    assert not state.get("answer")
+    assert "您想问哪个产品" in (state.get("answer") or "")
+    assert state["entity_clarify_candidates"] == ["一加 Ace 6T", "iPhone 18 Pro", "Redmi K80"]
 
 
 def test_required_with_empty_vocabulary_falls_back_to_unfiltered(node) -> None:
@@ -364,14 +377,35 @@ def test_call_entity_llm_swallows_failures_and_returns_empty(monkeypatch) -> Non
 # --------------------------------------------------------------------------
 
 def test_query_api_injects_entity_mode_at_both_entrypoints() -> None:
-    """同步与流式两条链路都要注入识别模式并载入词表，只改一条会让两个入口行为不一致。"""
+    """同步与流式两条链路都要注入识别模式、确认闸档位并载入词表，只改一条会两个入口行为不一致。"""
     text = API_QUERY.read_text(encoding="utf-8")
     # 两个运行入参都注入模式（同一段字面量），此外 _load_entity_vocabulary 内部还有一处模式判断
     assert text.count('"entity_recognition_mode": str(library.entity_recognition_mode or "disabled")') == 2
+    assert text.count('"entity_confirm_mode": str(library.entity_confirm_mode or "strict")') == 2
     assert text.count('"entity_vocabulary": entity_vocabulary') == 2
     assert "async def _load_entity_vocabulary" in text
     # 词表只取就绪且未删除文档，避免命中已下线实体却召不回切片
     assert 'Document.status == "ready"' in text and "Document.deleted_at.is_(None)" in text
+
+
+def test_clarify_candidates_reach_the_session_history() -> None:
+    """反问候选必须真的写进历史：下一轮“这句是不是在回答反问”只认 `clarify_candidates` 字段。
+
+    只钉“接口把候选递出去了”这一件事（不连 MongoDB）：三个落点（写入函数参数、两个端点的
+    调用）任一被改回“只存正文”，闭环就只能在单轮内生效，而反问本质上是个跳轮的行为。
+    """
+    api_text = API_QUERY.read_text(encoding="utf-8")
+    history_text = API_HISTORY.read_text(encoding="utf-8")
+    assert "clarify_candidates: List[str] = None" in history_text
+    assert '"clarify_candidates": [str(c) for c in (clarify_candidates or [])' in history_text
+    assert "clarify_candidates=list(clarify_candidates or [])" in api_text
+    assert api_text.count("clarify_candidates=") >= 2  # 同步端点与流式端点各一处
+
+
+def test_stream_completion_carries_clarify_candidates() -> None:
+    """流式端点在 `event_generator` 里落库，候选得先装进 workflow_complete 事件才能递到那一步。"""
+    text = API_QUERY.read_text(encoding="utf-8")
+    assert '"clarify_candidates": [' in text
 
 
 def test_entity_alignment_state_channels_are_declared() -> None:
@@ -384,4 +418,6 @@ def test_entity_alignment_state_channels_are_declared() -> None:
     assert {
         "entity_recognition_mode", "entity_vocabulary", "item_names", "answer",
         "query_entity_text", "entity_filter_relaxed",
+        # 阶段一：库级确认闸档位与本轮反问候选（TypedDict 没声明会被 LangGraph 静默丢弃）
+        "entity_confirm_mode", "entity_clarify_candidates",
     } <= declared

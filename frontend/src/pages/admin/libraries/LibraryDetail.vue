@@ -41,9 +41,16 @@ const errorMessage = computed(() => {
 
 const statusMeta = computed(() => (library.value ? getStatusMeta(LIBRARY_STATUS_META, library.value.status) : null))
 const visibilityLabel = computed(() => (library.value?.visibility === 'shared' ? '共享' : '私有'))
-const entityModeLabel = computed(() =>
-  library.value?.entity_recognition_mode === 'required' ? '强制实体识别' : '不启用实体识别',
-)
+/**
+ * 头部文案里的确认档位只在强制识别的库后面说：未启用实体识别时把档位一起挂上去，
+ * 管理员会以为“还有一个开关在起作用”，而它确实一句都不会执行。
+ */
+const entityModeLabel = computed(() => {
+  if (!library.value) return ''
+  if (library.value.entity_recognition_mode !== 'required') return '不启用实体识别'
+  const confirmPart = library.value.entity_confirm_mode === 'lenient' ? '（宽松：不反问）' : '（严格：先问一句）'
+  return `强制实体识别${confirmPart}`
+})
 const isActive = computed(() => library.value?.status === 'active')
 
 /** 上传弹窗锁定为当前库，杜绝跨库误传。 */

@@ -74,8 +74,12 @@ def _const(node: ast.stmt, name: str) -> object | None:
     return None
 
 
-def test_alembic_head_is_single_and_is_kb_entity() -> None:
-    """迁移链必须只有一个 head，且为本次新增的 kb_entity 迁移（防分叉）。"""
+def test_alembic_head_is_single_and_keeps_kb_entity_in_chain() -> None:
+    """迁移链必须只有一个 head（防分叉），且 kb_entity 迁移仍在这条链上、不是孤儿。
+
+    head 会随后续迁移前进（阶段一的库级 `entity_confirm_mode` 就是新的 head），所以这里
+    不再把 head 钉死成 `20260924_0006`；真正要守的是两件事：链不分叉、kb_entity 没被挤掉。
+    """
     revisions: set[str] = set()
     referenced: set[str] = set()
     for path in VERSIONS_DIR.glob("*.py"):
@@ -91,4 +95,6 @@ def test_alembic_head_is_single_and_is_kb_entity() -> None:
         if isinstance(down, str):
             referenced.add(down)
     heads = revisions - referenced
-    assert heads == {"20260924_0006"}, f"迁移链 head 应唯一且为 kb_entity，实际：{sorted(heads)}"
+    assert len(heads) == 1, f"迁移链 head 必须唯一（当前有分叉）：{sorted(heads)}"
+    assert "20260924_0006" in revisions, "kb_entity 迁移不得从版本目录里消失"
+    assert "20260924_0006" in referenced, "kb_entity 迁移必须有后继，不能顶替最新 head"

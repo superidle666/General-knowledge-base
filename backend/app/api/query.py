@@ -272,6 +272,7 @@ async def _persist_assistant_message(
     answer: str,
     sources: list[QuerySourceOut],
     image_urls: list[str],
+    clarify_candidates: list[str] | None = None,
 ) -> None:
     """登录用户查询完成后保存助手答复与可追溯来源。"""
     if user is None:
@@ -284,6 +285,8 @@ async def _persist_assistant_message(
             answer,
             sources=[source.model_dump(mode="json") for source in sources],
             image_urls=image_urls,
+            # 反问候选必须跟着落库：下一轮“是否在回答反问”只认这个字段，不从正文里抓
+            clarify_candidates=list(clarify_candidates or []),
         )
         await asyncio.to_thread(touch_user_session, session_id)
     except Exception:
@@ -434,6 +437,8 @@ async def query_knowledge_base(
             "use_hyde": bool(library.use_hyde),
             "use_web_search": payload.use_web_search,
             "entity_recognition_mode": str(library.entity_recognition_mode or "disabled"),
+            # 库级确认闸严格程度：required 库据此走“先问一句”还是“只筛选不反问”
+            "entity_confirm_mode": str(library.entity_confirm_mode or "strict"),
             "entity_vocabulary": entity_vocabulary,
             "is_stream": False,
             "persist_history": False,
@@ -448,7 +453,10 @@ async def query_knowledge_base(
     image_urls = [str(url) for url in result.get("image_urls") or [] if str(url).strip()]
     if not sources and not answer:
         answer = "当前知识库中没有找到与该问题相关的内容。"
-    await _persist_assistant_message(user, session_id, answer, sources, image_urls)
+    await _persist_assistant_message(
+        user, session_id, answer, sources, image_urls,
+        clarify_candidates=[str(c) for c in result.get("entity_clarify_candidates") or [] if str(c).strip()],
+    )
     return QueryResponse(
         library_id=payload.library_id,
         session_id=session_id,
@@ -484,6 +492,7 @@ async def stream_query_knowledge_base(
                 "use_hyde": bool(library.use_hyde),
                 "use_web_search": payload.use_web_search,
                 "entity_recognition_mode": str(library.entity_recognition_mode or "disabled"),
+                "entity_confirm_mode": str(library.entity_confirm_mode or "strict"),
                 "entity_vocabulary": entity_vocabulary,
                 "is_stream": True,
                 "persist_history": False,
@@ -492,6 +501,10 @@ async def stream_query_knowledge_base(
                 "answer": str(result.get("answer") or "").strip(),
                 "sources": result.get("sources") or [],
                 "image_urls": result.get("image_urls") or [],
+                # 候选清单随事件透传出去，event_generator 才能把它写进会话历史
+                "clarify_candidates": [
+                    str(c) for c in result.get("entity_clarify_candidates") or [] if str(c).strip()
+                ],
             })
         except Exception:
             push_to_session(stream_id, SSEEvent.ERROR, {
@@ -538,7 +551,12 @@ async def stream_query_knowledge_base(
                     sources=sources,
                     image_urls=image_urls,
                 )
-                await _persist_assistant_message(user, session_id, answer, sources, image_urls)
+                await _persist_assistant_message(
+                    user, session_id, answer, sources, image_urls,
+                    clarify_candidates=[
+                        str(c) for c in data.get("clarify_candidates") or [] if str(c).strip()
+                    ],
+                )
                 yield _sse_event(SSEEvent.FINAL, response.model_dump(mode="json"))
                 return
         except asyncio.CancelledError:

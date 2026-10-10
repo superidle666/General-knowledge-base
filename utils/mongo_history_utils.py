@@ -114,6 +114,7 @@ def save_chat_message(
         image_urls: List[str] = None,
         message_id: str = None,
         sources: List[Dict[str, Any]] = None,
+        clarify_candidates: List[str] = None,
 ) -> str:
     """
     写入/更新单条会话记录到MongoDB
@@ -125,6 +126,10 @@ def save_chat_message(
     :param item_names: 关联的商品名称列表（可选，支持多商品，默认None）
     :param image_urls: 关联的图片URL列表（可选，默认None）
     :param message_id: 记录主键ID（可选，有值则更新，无值则新增）
+    :param sources: 可追溯来源列表（可选，默认None）
+    :param clarify_candidates: 反问时列给用户的候选型号（可选，默认None）。
+        下一轮要靠它判断"用户这句话是不是在回答反问"，所以必须落库，
+        不能只放在回答正文里用正则回捞（正文措辞一改就断）。
     :return: 插入/更新的记录唯一标识（新增返回ObjectId字符串，更新返回传入的message_id）
     """
     # 生成当前时间的时间戳（秒级），用于记录消息的创建时间，后续用于排序和查询
@@ -139,6 +144,8 @@ def save_chat_message(
         "item_names": item_names,  # 关联商品名称列表
         "image_urls": image_urls,  # 关联图片URL列表
         "sources": sources or [],
+        # 反问候选清单：只有发反问那一轮才有值，其它轮次留空列表
+        "clarify_candidates": [str(c) for c in (clarify_candidates or []) if str(c).strip()],
         "ts": ts  # 时间戳，排序和时间筛选维度
     }
 

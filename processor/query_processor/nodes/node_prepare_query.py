@@ -14,6 +14,23 @@ from processor.query_processor.chitchat_gate import (
     should_ask_llm,
     within_llm_gate_len,
 )
+from processor.query_processor.entity_confirm import (
+    ENTITY_CONFIRM_MODE_STRICT,
+    build_inherited_retrieval_text,
+    clarify_candidate_cap,
+    clarify_max_rounds,
+    count_clarify_rounds,
+    distinct_writings,
+    is_brand_level_turn,
+    last_clarify_round,
+    match_clarify_answer,
+    mentions_written_this_turn,
+    resolve_confirm_mode,
+    same_family,
+    split_product_mentions,
+    unlisted_brand_group,
+    unlisted_model_group,
+)
 from processor.query_processor.inventory_gate import (
     INVENTORY_REJECT_REPLY,
     is_library_inventory_question,
@@ -50,7 +67,6 @@ REFERENCE_PATTERN = re.compile(r"(?:这款|这个|该设备|该产品|它|上述
 ENTITY_ALIGN_LLM_TIMEOUT = 4.0
 ENTITY_ALIGN_LLM_RETRIES = 0
 MAX_ENTITY_MENTIONS = 5
-MAX_CLARIFY_CANDIDATES = 8
 MAX_HISTORY_MESSAGES_FOR_EXTRACT = 4
 HISTORY_CHARS_FOR_EXTRACT = 600
 # 闲聊 L2 兜底分类的历史窗口。与上面抽取通道**刻意不是同一口径**：那条只认 role=="user"，
@@ -107,6 +123,11 @@ _LEADING_CONNECTIVE_RE = re.compile(r"^(?:那么|那|还有|然后|另外|顺便
 
 CLARIFY_TEMPLATE = "您是想问以下哪个产品：{candidates}？请补充更明确的型号或产品名。"
 REFUSE_TEMPLATE = "当前知识库未收录与该型号相关的产品文档，请确认型号或改用其它知识库。"
+# 确认闸新增的三句固定话术（铁律 2："没提型号"和"提了但认不出"问法不同，未收录则直说）。
+NO_ENTITY_CLARIFY_TEMPLATE = "您想问哪个产品？本库收录了：{candidates}。"
+UNLISTED_BRAND_TEMPLATE = "当前知识库未收录 {brand} 品牌的产品，请确认品牌或改用其它知识库。"
+# 候选多到念不完时补的那一句。老项目在这里退回答不中，本次不退：用户直接报名字就能继续。
+CLARIFY_OVERFLOW_SUFFIX = "（还有其他型号，请直接报名字）"
 # R7：本轮只说到品牌（或品牌 + 品类）时按品牌组把检索收窄到本库那一款。一旦线上怀疑它
 # 收窄错了，设 BRAND_GROUP_FILTER_DISABLE=1 就退回“品牌词一律不带过滤”的旧行为。
 BRAND_GROUP_FILTER_DISABLE_ENV = "BRAND_GROUP_FILTER_DISABLE"
@@ -114,9 +135,13 @@ BRAND_GROUP_FILTER_DISABLE_ENV = "BRAND_GROUP_FILTER_DISABLE"
 # ---------------------------------------------------------------------------
 # 诊断埋点：实体对齐走了哪条出口（只记录，不参与任何判定）
 # ---------------------------------------------------------------------------
-# 代码上是 11 个取值，不是六道出口：⑥“裸搜”是三合一兜底（没提到实体 / 词表为空 / 品牌组放弃 /
+# 代码上早就不止“六道出口”了：⑥“裸搜”是三合一兜底（没提到实体 / 词表为空 / 品牌组放弃 /
 # 连品牌词都不是），四格的病因和治法完全不同（会话锚 / 重导入 / 品类维度 / 别名扩充），
 # 合并成一个值统计就失去意义。再加两格“根本没跑到对齐”的早退，用来区分“没跑”与“跑了没命中”。
+# 阶段一的确认闸又添了七格：五道闸各自的新出口（未收录品牌 / 未收录系列 / 多点名否决 /
+# 第五档反问 / 单款库收窄 / 到上限降级）加闭环那一格“本轮在回答反问”。
+# **增删必须同时改 tests\test_entity_align_exit_probe.py 的 EXPECTED_EXITS 与 eval\exit_probe.py
+# 的中文标签**，否则分布表那一列永远空白并被读成“没有这类问题”。
 EXIT_HIT_EXACT = "hit_exact"  # ①逐字/别名干净命中 → 带过滤
 EXIT_SINGLE_CANDIDATE = "single_candidate"  # ②唯一模糊候选 → 直接采纳，不反问
 EXIT_CLARIFY = "clarify"  # ③模糊候选 ≥2 → 反问（短路）
@@ -128,10 +153,21 @@ EXIT_NO_MENTION = "no_mention"  # ⑥那句话里根本没有实体形状（属�
 EXIT_EMPTY_VOCAB = "empty_vocab"  # ⑥本库词表为空（required 空壳库）：纯数据问题
 EXIT_NOT_REQUIRED = "not_required"  # disabled 库：整段没跑对齐（对照组）
 EXIT_PRE_GATED = "pre_gated"  # 前置闸/参数校验已预置 answer：还没走到对齐
+# ---- 阶段一：严格确认闸的六格 + 闭环那一格 ----
+EXIT_CLARIFY_ANSWERED = "clarify_answered"  # 本轮是在回答上一轮那句反问，已认下用户挑的那一项
+EXIT_UNLISTED_BRAND = "unlisted_brand"  # 闸①：点名的品牌本库根本没有 → 直说未收录（短路）
+EXIT_UNLISTED_MODEL = "unlisted_model"  # 闸①后半：品牌本库有、那一代却没有 → 裸搜，绝不替用户换型号
+EXIT_MULTI_MENTION_DEFER = "multi_mention_defer"  # 闸④：点了两个写法只对上一个 → 不按实体收窄
+EXIT_CONFIRM_CLARIFY = "confirm_clarify"  # 闸⑤：这句没写型号，列本库名单问“您想问哪个”（短路）
+EXIT_SINGLE_PRODUCT_NARROWED = "single_product_narrowed"  # 闸⑤前半：本库仅一款 → 直接收窄，不问
+EXIT_DEGRADED_ANSWER = "degraded_answer"  # 反问次数已到上限 → 不再问，退不带过滤检索
 ENTITY_ALIGN_EXITS: tuple[str, ...] = (
     EXIT_HIT_EXACT, EXIT_SINGLE_CANDIDATE, EXIT_CLARIFY, EXIT_REFUSE,
     EXIT_BRAND_NARROWED, EXIT_BRAND_GIVEUP, EXIT_NO_BRAND_GROUP,
     EXIT_NO_MENTION, EXIT_EMPTY_VOCAB, EXIT_NOT_REQUIRED, EXIT_PRE_GATED,
+    EXIT_CLARIFY_ANSWERED, EXIT_UNLISTED_BRAND, EXIT_UNLISTED_MODEL,
+    EXIT_MULTI_MENTION_DEFER, EXIT_CONFIRM_CLARIFY, EXIT_SINGLE_PRODUCT_NARROWED,
+    EXIT_DEGRADED_ANSWER,
 )
 
 
@@ -348,6 +384,12 @@ class NodePrepareQuery(NodeBase):
         """
         if not should_ask_llm(text):
             return False
+        # 本轮是在回答系统自己发出的反问时不走 L2：“15 Pro”、“第二个”短而无实体信号，
+        # 正好落在闲聊门禁里，一旦被 L2 判成闲聊就 pre_gated，闭环永远跑不到——那就是
+        # 强制确认方案最怕的死循环（问一句、答一句、又回一句闲聊）。
+        clarify_candidates, _predicate = last_clarify_round(state.get("history"))
+        if clarify_candidates and match_clarify_answer(text, clarify_candidates):
+            return False
         if NodePrepareQuery._query_names_known_entity(state, text):
             return False
         if NodePrepareQuery._entity_alignment_available(state):
@@ -402,7 +444,7 @@ class NodePrepareQuery(NodeBase):
     @staticmethod
     def _mark_align_exit(state: QueryGraphState, exit_tag: str, **signals) -> None:
         """写入本轮实体对齐走了哪条出口。**集中一处的理由只有一个**：静态守卫能钉住“只有这里写”，
-        而 11 个分支各写一份必然漏写，漏一格就把统计口径带偏。
+        而十几条分支各写一份必然漏写，漏一格就把统计口径带偏。
 
         `entity_align_exit` / `entity_align_signals` 是诊断字段：检索、生成、接口与前端都不读它们，
         写它们不改变任何行为（包括 disabled 库）。同一请求只会命中一条出口，因此后写不存
@@ -429,6 +471,9 @@ class NodePrepareQuery(NodeBase):
         return {
             "mention_count": len(mentions),
             "mentions": list(mentions),
+            # 本轮走的是严格确认闸还是旧链。两档的分布必须分开统计，否则“确认闸有没有用”
+            # 这个同题对比会被混成一堆。
+            "confirm_mode": resolve_confirm_mode(state.get("entity_confirm_mode")),
             "query_rewritten": str(state.get("rewritten_query") or "") != query_text,
             "ellipsis_followup": NodePrepareQuery._looks_like_ellipsis_followup(query_text),
             "brand_group": list(brand_groups_in_mentions(mentions)),
@@ -448,16 +493,34 @@ class NodePrepareQuery(NodeBase):
     # ------------------------------------------------------------------
 
     def _align_entity(self, state: QueryGraphState) -> None:
-        """把问题里的实体与接口注入的本库词表对齐：命中即过滤，唯一模糊候选直接采纳，
+        """实体对齐的唯一入口：按库级严格程度分到两条链上，**两条链各自只记自己的出口**。
+
+        分成两条而不是在原链上插 `if strict`：`ENTITY_CONFIRM_GATE_DISABLE=1` 要能退回
+        改造前的判定当线上基线（项目惯例：每道新闸都得能一键关掉对比）。原链里每一个分支
+        都保着“本轮逐字命中答对的题”与“靠历史锚答对的属性追问”（阶段零的一票否决项），
+        把新判据织进去就跟那条基线不可比了。
+
+        严格链的六道出口顺序不能换（阶段零实测定的）：未收录品牌排在任何形状/相似度采纳之前，
+        品牌级提问排在反问之前，第五档排在逐字命中与借历史锚之后。
+        """
+        mentions = self._extract_mentions(state)
+        signals = self._align_signals(state, mentions)
+        if resolve_confirm_mode(state.get("entity_confirm_mode")) != ENTITY_CONFIRM_MODE_STRICT:
+            self._align_entity_best_effort(state, mentions, signals)
+            return
+        # 闭环排在全部闸之前：用户答反问时只甩一个型号名（“15 Pro”、“第二个”），
+        # 那串没有品牌词、也常常抽不出形状，走正常判定会被当成歧义又问一遍。
+        if self._resolve_clarify_answer(state, signals):
+            return
+        self._align_entity_confirm(state, mentions, signals)
+
+    def _align_entity_best_effort(self, state: QueryGraphState, mentions: list[str], signals: dict) -> None:
+        """宽松档（与改造前逐字相同的那条链）：命中即过滤，唯一模糊候选直接采纳，
         多候选才反问；查无且非明确型号代码时退回不带过滤检索（best-effort），不轻易拒答。
 
         五个出口之外还有一条 R7：品牌词对不上规范名不等于无法收窄，本库该品牌只有一款时
         照样能过滤（见 `_apply_brand_group_narrowing`）。
-
-        每个分支都顺带记一次诊断出口（`_mark_align_exit`）：只写两个诊断字段，不据此做任何决定。
         """
-        mentions = self._extract_mentions(state)
-        signals = self._align_signals(state, mentions)
         if not mentions:
             # 抽不到实体：不臆断也不拒答，退回不带过滤的检索，尽量仍给出答案（best-effort）。
             self._mark_align_exit(state, EXIT_NO_MENTION, **signals)
@@ -482,9 +545,7 @@ class NodePrepareQuery(NodeBase):
             self._mark_align_exit(state, EXIT_SINGLE_CANDIDATE, candidate_count=1, **signals)
         elif candidates:
             # 多个模糊候选才是真正的歧义，列出来让用户二选一。
-            shown = list(candidates)[:MAX_CLARIFY_CANDIDATES]
-            state["answer"] = CLARIFY_TEMPLATE.format(candidates="、".join(shown))
-            self._mark_align_exit(state, EXIT_CLARIFY, candidate_count=len(candidates), shown_count=len(shown), **signals)
+            self._clarify_or_degrade(state, list(candidates), reason="multi_candidates", signals=signals)
         elif self._query_names_model_code(state, mentions):
             # 仅当【当前问题本身】点名了一个具体型号代码（如 APL-005）而本库词表查无，才拒答以防跨产品串答；
             # 品牌词/前缀/错别字一律走下面的 best-effort，不拒答。
@@ -497,6 +558,263 @@ class NodePrepareQuery(NodeBase):
             # 能按品牌组唯一对上本库那一款就收窄，对不上就保持 item_names 为空、退回不带过滤
             # 检索，交给生成阶段判断有无相关内容——既不硬拒答，也不拿猜测去收窄。
             self._apply_brand_group_narrowing(state, mentions, index, signals)
+
+    def _align_entity_confirm(self, state: QueryGraphState, mentions: list[str], signals: dict) -> None:
+        """严格档：型号确认了才按它筛选，确认不了就问——包括那句压根没提取到型号的情况。
+
+        六道出口按阶段零的数落成固定顺序，每条都只读不算（判定量全部由前置步骤备好）：
+
+        0. `wifi7`/`PPS1.2`/`蓝牙 5.3` 这类协议版本号先摘掉（它们与型号同形、分数带还重叠，
+           只能黑名单挡）；摘完一个不剩就当“这句没写型号”。
+        1. 逐字命中优先于一切（一票否决：那批答对的题不能弄坏），但先过多点名否决。
+        2. 本库没有的品牌直说未收录；提及只到品牌/品类粒度则不收窄也不反问。
+        3. 本轮一个字都没写型号：借到了历史锚就裸搜，没借到才进第五档（单款收窄 / 列名单问）。
+        4. 模糊命中：唯一候选且本库没同族另一款直接采纳；写法本身可指向同族多款就降为没把握去问。
+        5. 收尾仍是那三条旧出口：收紧档型号代码拒答、品牌本库有但那代查无退裸搜、品牌收窄。
+        """
+        products, protocols = split_product_mentions(mentions)
+        if protocols:
+            signals["protocol_tokens"] = list(protocols)
+        # 铁律 1：只有本轮用户自己写的才算“点名”，改写从历史借进来的不算（与 R2 拒答护栏同口径）。
+        written = mentions_written_this_turn(products, str(state.get("query_entity_text") or ""))
+        borrowed = [mention for mention in products if mention not in written]
+        if borrowed:
+            signals["borrowed_mentions"] = list(borrowed)
+        index = self._build_vocab_index(state.get("entity_vocabulary"))
+        if not index:
+            self._mark_align_exit(state, EXIT_EMPTY_VOCAB, vocab_size=0, **signals)
+            return
+        signals["vocab_size"] = len(index)
+        names = [canonical for canonical, _ in index]
+        confirmed, candidates = self._match_mentions(products, index) if products else ([], [])
+        # 同族候选只用本轮写法算：历史借来的串拿去圈同族会把上一轮的话题当成歧义对象去问。
+        family = self._ambiguous_family(written, names)
+        if family:
+            signals["family_candidates"] = list(family)
+        if confirmed:
+            if self._multi_mention_veto(state, written, confirmed, index, names, signals):
+                return
+            state["item_names"] = list(confirmed)
+            logger.info("检索实体对齐命中 %s 个实体：%s", len(confirmed), "、".join(confirmed))
+            self._mark_align_exit(state, EXIT_HIT_EXACT, confirmed_count=len(confirmed), **signals)
+            return
+        unlisted_brand = unlisted_brand_group(written, names)
+        if unlisted_brand:
+            # 4.8 第 1 条：本库没有的品牌必须在这里否掉。下一档就是相似度（阶段三），
+            # 而实测里 `小米 15` → `iPhone 15` 能拿 0.7489，比真变体还高。
+            state["answer"] = UNLISTED_BRAND_TEMPLATE.format(brand=unlisted_brand)
+            self._mark_align_exit(state, EXIT_UNLISTED_BRAND, unlisted_brand=unlisted_brand, **signals)
+            return
+        if is_brand_level_turn(products):
+            # 4.8 第 2 条：`有苹果手机吗` 问的是库里有什么而不是哪一款，不收窄也不反问，
+            # 交给品牌组那一格：恰好一款就收窄，多就退不带过滤检索让生成阶段把该品牌全列出来。
+            self._apply_brand_group_narrowing(state, products, index, signals)
+            return
+        if not written:
+            self._handle_missing_entity(state, borrowed=borrowed, names=names, signals=signals)
+            return
+        if len(candidates) == 1 and len(family) < 2:
+            # 模糊命中唯一、且本库没有同族另一款（阶段零那 7 条走的就是这一格）：直接采纳。
+            state["item_names"] = list(candidates)
+            logger.info("检索实体对齐唯一候选直接采纳：%s", "、".join(candidates))
+            self._mark_align_exit(state, EXIT_SINGLE_CANDIDATE, candidate_count=1, **signals)
+            return
+        ask_pool = self._merge_names(candidates, family)
+        if len(ask_pool) > 1:
+            # 该问的三种成因共用一条出口：模糊候选多个、写法本身可指向同族多款（`苹果15`）、
+            # 以及逐字没命中但同族候选列得出来。问法相同，只换信号里的 reason。
+            self._clarify_or_degrade(
+                state, ask_pool,
+                reason="family_ambiguous" if not candidates else "multi_candidates",
+                signals=signals,
+            )
+            return
+        if self._query_names_model_code(state, products):
+            state["answer"] = REFUSE_TEMPLATE
+            self._mark_align_exit(state, EXIT_REFUSE, model_code_named=True, **signals)
+            return
+        unlisted_model = unlisted_model_group(written, names)
+        if unlisted_model:
+            # 品牌本库有、那一代却没收录（`iPhone 17` 而库里只有 18）：同族候选都列不出来，
+            # 既不收窄也不反问，退不带过滤检索。老规矩“继不替用户把 17 换成 18”接到新闸上。
+            self._mark_align_exit(state, EXIT_UNLISTED_MODEL, unlisted_brand=unlisted_model, **signals)
+            return
+        self._apply_brand_group_narrowing(state, products, index, signals)
+
+    def _resolve_clarify_answer(self, state: QueryGraphState, signals: dict) -> bool:
+        """本轮在回答上一轮那句反问：认下用户挑的那一项并把谓词接回来，返回 True 就走完判定。
+
+        现状是断的：候选列写进了助手消息正文，状态里却没有任何“我刚发了候选、正等回答”的
+        痕迹，用户回“15 Pro”或“第二个”会被当成新一轮重抽 → 又问一遍。这里补的是 4.3 的五步：
+        ① 候选清单从历史里的 `clarify_candidates` 字段读（不从回答正文正则回捐：正文是给人看的
+        句子，顿号、“还有其他型号”都会变）；② 只认还没被回答的那一次反问；③ 命中就写
+        `item_names` 并把上一轮的属性补回检索词；④ 对不上候选（用户换了型号或换了话题）
+        一律返回 False 交回正常流程——这一条是本方案最隐蔽的坑；⑤ 候选里那一款已被删除时
+        同样交回正常流程，不拿一个已经不存在的名字去收窄。
+        """
+        candidates, predicate = last_clarify_round(state.get("history"))
+        if not candidates:
+            return False
+        text = str(state.get("query_entity_text") or state.get("original_query") or "")
+        chosen = match_clarify_answer(text, candidates)
+        if not chosen:
+            return False
+        index = self._build_vocab_index(state.get("entity_vocabulary"))
+        if chosen not in {canonical for canonical, _ in index}:
+            logger.info("反问候选“%s”已不在本库名单中（文档已删或重导入），交回正常实体判定", chosen)
+            return False
+        state["item_names"] = [chosen]
+        inherited = build_inherited_retrieval_text(chosen, predicate, text)
+        if inherited:
+            state["rewritten_query"] = inherited[:MAX_RETRIEVAL_TEXT_CHARS]
+        self._mark_align_exit(
+            state, EXIT_CLARIFY_ANSWERED,
+            chosen=chosen, clarify_candidate_count=len(candidates), predicate_inherited=bool(predicate),
+            **signals,
+        )
+        logger.info("已从反问回答中确认实体并继承上一轮谓词：%s｜%s", chosen, state["rewritten_query"][:60])
+        return True
+
+    def _handle_missing_entity(
+            self,
+            state: QueryGraphState,
+            *,
+            borrowed: list[str],
+            names: list[str],
+            signals: dict,
+    ) -> None:
+        """第五档：这句没写出型号。先借历史锚，借不到就问（严格口径，4.2 第五档）。
+
+        三个出口全部拍在阶段零定下的口径上：
+        - 借到了线索（从上一轮用户话里回填、本轮自己没写）：算“有线索”，退不带过滤检索而不问。
+          拿本库名单去问已经点过名的用户就是明知故问，而且会把“靠历史锚答对的属性追问”
+          那批题弄坏（一票否决项）。名单里找不到那条线索时也不反问：宁可少走一路，
+          也不替用户猜对象（与 R7 同取向）。
+        - 本库只有一款：不问，直接收窄到那款（库里就一个对象，反问比拒答更难受）。
+        - 多款：列名单问“您想问哪个产品”；多到念不完只列前几个并明说“还有其他型号，
+          请直接报名字”，不像老项目那样退回答不中。
+        """
+        if borrowed:
+            self._mark_align_exit(state, EXIT_NO_MENTION, borrowed_only=True, **signals)
+            return
+        if not names:
+            self._mark_align_exit(state, EXIT_EMPTY_VOCAB, vocab_size=0, **signals)
+            return
+        if len(names) == 1:
+            state["item_names"] = list(names)
+            self._mark_align_exit(state, EXIT_SINGLE_PRODUCT_NARROWED, **signals)
+            logger.info("本库仅收录一款实体，属性追问直接收窄：%s", names[0])
+            return
+        self._clarify_or_degrade(state, names, reason="no_entity", signals=signals, whole_library=True)
+
+    def _clarify_or_degrade(
+            self,
+            state: QueryGraphState,
+            pool: list[str],
+            *,
+            reason: str,
+            signals: dict,
+            whole_library: bool = False,
+    ) -> None:
+        """列得出候选就问；已经问到上限就不再问，退成不带过滤检索（4.4 防死循环）。
+
+        **阶段一版降级答只做“不再反问、退裸搜”**：“按最像的那款先答 + 末尾声明”要等阶段三
+        有相似度分数才有“最像”可挑，现在手里没有任何分数，挑一个就是拿猜测去收窄。
+
+        候选清单原样写进 `entity_clarify_candidates`，由接口落到本轮助手历史消息上（闭环第 1 步）。
+        发反问这一轮**不算确认上**：`item_names` 保持为空，候选也不拿去向下一轮当话题锚
+        （现有规矩只锚用户真点过名的，绝不锚助手列过的清单）。
+        """
+        cap = clarify_candidate_cap()
+        limit = clarify_max_rounds()
+        asked = count_clarify_rounds(state.get("history"))
+        if limit <= 0 or asked >= limit:
+            self._mark_align_exit(
+                state, EXIT_DEGRADED_ANSWER,
+                clarify_reason=reason, candidate_count=len(pool), asked_rounds=asked, **signals
+            )
+            logger.info("本会话已反问 %s 次（上限 %s），这次退成不带过滤检索（原因=%s）", asked, limit, reason)
+            return
+        shown = list(pool)[:cap]
+        state["entity_clarify_candidates"] = shown
+        extra = {"clarify_reason": reason, "candidate_count": len(pool), "shown_count": len(shown)}
+        if whole_library:
+            tail = CLARIFY_OVERFLOW_SUFFIX if len(pool) > cap else ""
+            state["answer"] = NO_ENTITY_CLARIFY_TEMPLATE.format(candidates="、".join(shown) + tail)
+            # 出口名直接传 EXIT_* 常量（而不是先赋给一个局部变量）：静态守卫靠 `_mark_align_exit(state,` 背面的
+            # 常量名认写入点，传变量会被报成“定义了却没人写”。
+            self._mark_align_exit(state, EXIT_CONFIRM_CLARIFY, **extra, **signals)
+        else:
+            state["answer"] = CLARIFY_TEMPLATE.format(candidates="、".join(shown))
+            self._mark_align_exit(state, EXIT_CLARIFY, **extra, **signals)
+
+    def _multi_mention_veto(
+            self,
+            state: QueryGraphState,
+            written: list[str],
+            confirmed: list[str],
+            index: list[tuple[str, set[str]]],
+            names: list[str],
+            signals: dict,
+    ) -> bool:
+        """一句话里两个以上互不相同的写法、却只对上一个 → 不收窄（本轮错二的堵法）。
+
+        计数先过 `distinct_writings`：实测里 `thinkpad x1 carbon gen12` 的真实提及是
+        `['x1', 'gen12', 'thinkpad x1 carbon gen12']` 三条，直接数个数会把一个型号当三个实体，
+        反而拆掉自己本来正确的收窄。
+
+        再过一道“本库认不认得”：`HAK-180 报错 E12 怎么处理` 抽出来是两条写法，但 `E12` 是
+        报错码、在本库名单里圈不出任何对象，把它当成第二个型号会把“逐字命中答对”那批题弄坏
+        （一票否决项）。只数那些能在本库对上号的写法。两个都对上时不管（多值筛选本来就是通的）。
+        """
+        writings = distinct_writings(written)
+        if len(writings) < 2 or len(confirmed) != 1:
+            return False
+        product_like = [writing for writing in writings if self._writing_maps_to_library(writing, index, names)]
+        if len(product_like) < 2:
+            return False
+        self._mark_align_exit(
+            state, EXIT_MULTI_MENTION_DEFER, writing_count=len(product_like), confirmed_count=len(confirmed), **signals
+        )
+        logger.info("本轮点名了 %s 个本库认得的不同写法但只对上一个（%s），不按实体收窄检索",
+                    len(product_like), confirmed[0])
+        return True
+
+    @staticmethod
+    def _writing_maps_to_library(writing: str, index: list[tuple[str, set[str]]], names: list[str]) -> bool:
+        """这个写法能在本库里圈出对象吗（逐字/别名/模糊候选/同族任一）。只读已备好的名单，不发外部调用。"""
+        hit, candidates = NodePrepareQuery._match_mentions([writing], index)
+        if hit or candidates:
+            return True
+        return bool(same_family(writing, names))
+
+    @staticmethod
+    def _ambiguous_family(written: list[str], names: list[str]) -> list[str]:
+        """本轮写法在本库里能圈出两款以上同族型号时返回那个族（4.8 第 3 条“写法本质歧义”）。
+
+        只算“同族”，不算“相邻”：`iphone15` 逐字等于 `iPhone 15` 时上面已经走 hit_exact，
+        不会到这里；`苹果15`/`15`/`iphone15por` 这些写法语言上就定不下来（实测 top1 高到
+        0.8849 仍指错款），圈出的就是 [iPhone 15, iPhone 15 Pro] 这一族。
+        只圈出一款时不拦（`ace6t`）：拿“库里没另一款”这个事实就能定下来，去问是明知故问。
+        """
+        merged: dict[str, None] = {}
+        for mention in written:
+            for name in same_family(mention, names):
+                merged[name] = None
+        return list(merged)
+
+    @staticmethod
+    def _merge_names(candidates: list[str], family: list[str]) -> list[str]:
+        """把模糊候选与同族候选并成一个反问清单（按首次出现顺序去重）。
+
+        必须并而不是二选一：`iphone15por` 的模糊命中只有 `iPhone 15`（子串包含判据天然够不到
+        15 Pro），只拿 candidates 念出来会把用户真正想要的那一款漏掉——反问念出的名单
+        必须完整正确，否则这一格从“答错”变成“问错”，比不开闸还糟。
+        """
+        merged: dict[str, None] = {}
+        for name in list(candidates) + list(family):
+            merged[name] = None
+        return list(merged)
 
     def _apply_brand_group_narrowing(
             self,

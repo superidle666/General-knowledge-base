@@ -59,10 +59,18 @@ class QueryGraphState(TypedDict, total=False):
     # 模式由接口按知识库注入；required 库才对齐，disabled 库整段跳过保证零回归。
     entity_recognition_mode: str  # 该库实体识别模式：disabled / required
     entity_vocabulary: list  # required 库的实体词表 [{"name": str, "aliases": [str]}]，由接口异步载入并注入
+    # 确认闸的严格程度（库级字段，跟 entity_recognition_mode 同层）：strict = 确认不了就问，
+    # lenient = 只筛选不反问（改造前那条链）。键缺失按 strict 处理，理由见 entity_confirm.resolve_confirm_mode：
+    # 接口漏注入一个键就把闸静默关掉，比多问一句难发现得多。
+    entity_confirm_mode: str
+    # 本轮发反问时列出的候选清单：不参与任何判定，只供接口把它落到本轮助手历史消息上，
+    # 下一轮才能认出“用户在回答哪一问”（反问闭环，见 entity_confirm.last_clarify_round）。
+    # 必须在这里声明：TypedDict 没列出的键会被 LangGraph 静默丢弃，丢了就是闭环接不上。
+    entity_clarify_candidates: list
 
     # 诊断埋点（先量后治的第一步）：只记录本轮实体对齐走了哪条出口，供离线统计“线上问题实际漏在哪个出口”。
     # 这两个键**不参与任何判定**：检索、生成、接口与前端都不读它们，写它们不改变任何行为，
-    # disabled 库同样落值（not_required）以便当对照组。取值集合见 node_prepare_query.ENTITY_ALIGN_EXITS，
+    # disabled 库同样落值（not_required）以便当对照组。取值集合见 node_prepare_query.ENTITY_ALIGN_EXITS（18 格），
     # 写入位置只有 NodePrepareQuery._mark_align_exit 一处（静态守卫钉住，防分支散落漏写）。
     entity_align_exit: str  # 出口标记；区分“没跑到对齐”（not_required/pre_gated）与“跑了没命中”（no_mention/empty_vocab/…）
-    entity_align_signals: dict  # 与出口同时记录的中间量，全部取自判定过程本来就算过的值（mentions/品牌组/是否省略追问/词表规模…）
+    entity_align_signals: dict  # 与出口同时记录的中间量，全部取自判定过程本来就算过的值（mentions/品牌组/是否省略追问/词表规模/确认闸档位…）
