@@ -110,6 +110,8 @@ knowledge_base/
 ├─ config/        模型、数据库、MinIO、Milvus 等配置
 ├─ utils/         向量、Mongo、MinIO、Redis、日志等基础工具
 ├─ tool/          下载模型、日志等辅助工具
+├─ tests/         pytest 自动化测试套件（开发期工具，未纳入版本库）
+├─ eval/          RAGAS 评测与实体出口探针脚本（开发期工具，未纳入版本库）
 ├─ storage/       本地处理文件和中间产物
 ├─ tmp/           项目规范、规划和临时资料
 ├─ pyproject.toml Python 依赖和 uv 配置
@@ -208,12 +210,23 @@ npm.cmd run build
 ## 7. 常用验证命令
 
 ```powershell
+# 后端自动化测试（tests/，默认只跑不依赖外部服务的用例）
+uv run pytest
+# 需要连 MySQL / Milvus / Redis / MongoDB / LLM 的联调用例显式加标记单跑
+uv run pytest -m integration
+
+# 后端关键模块语法自检
 python -m py_compile backend/app/main.py backend/app/api/auth.py backend/app/api/mysql.py backend/app/api/query.py
+
+# 前端类型检查与构建
 npm.cmd run build --prefix frontend
+
 git diff --check
 ```
 
 Windows PowerShell 下如果 `npm` 命令被执行策略拦截，使用 `npm.cmd`。
+
+自动化测试位于 `tests/`，配置见 `pyproject.toml` 的 `[tool.pytest.ini_options]`（`testpaths = ["tests"]`，默认 `-m "not integration"`）。
 
 ## 8. 当前功能范围
 
@@ -233,7 +246,7 @@ Windows PowerShell 下如果 `npm` 命令被执行策略拦截，使用 `npm.cmd
 3. 完善权限审计，记录授权、撤销、越权拦截和管理操作。
 4. 优化图片与回答内容的关联，避免同批召回中的无关图片被带入答案。
 5. 增强检索质量评估、召回过滤、实体识别和回答引用准确性。
-6. 逐步补充自动化测试、部署脚本和生产环境监控。
+6. 扩展自动化测试覆盖（`tests/` 已提供 pytest 套件，后续补齐 API 与前端用例）、部署脚本和生产环境监控。
 
 ## 10. 开发约束
 

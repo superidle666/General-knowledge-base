@@ -12,16 +12,25 @@ processor/
 │  ├─ main_graph.py         导入图和节点路由
 │  ├─ worker.py             后台任务执行入口
 │  ├─ state.py              导入状态
+│  ├─ base.py               导入节点基类与公共能力
 │  ├─ import_config.py      导入配置
 │  ├─ content_blocks.py     内容块结构
-│  ├─ nodes/                导入节点
+│  ├─ nodes/                导入节点（PDF 转 Markdown、图片、切分、实体识别、向量化、写入）
 │  └─ exceptions.py         导入异常
 └─ query_processor/         知识库检索问答工作流
    ├─ main_graph.py         查询图和条件路由
    ├─ state.py              查询状态
    ├─ base.py               查询基础能力
+   ├─ intents.py            意图注册表
+   ├─ chitchat_gate.py      闲聊拦截闸
+   ├─ entity_confirm.py     实体确认闸（反问 / 只筛选）
+   ├─ inventory_gate.py     清单型元问题闸
+   ├─ metadata_gate.py      库级元数据闸
+   ├─ meta_instruction.py   元指令处理（回指 / 改写）
+   ├─ topic_consistency.py  主题一致性闸
+   ├─ retrieval_common.py   召回与合并公共能力
    ├─ nodes/                召回、重排、来源和答案节点
-   └─ prompt/               查询改写和答案提示词
+   └─ prompt/               查询改写、意图、实体和答案提示词
 ```
 
 ## 3. 技术栈
@@ -47,7 +56,7 @@ processor/
 
 ## 5. 导入模块
 
-详见 `processor/import_processor/RENAME.md`。
+图编排见 `processor/import_processor/main_graph.py`，各节点实现位于 `processor/import_processor/nodes/`。
 
 导入模块负责：
 
@@ -61,17 +70,18 @@ processor/
 
 ## 6. 检索模块
 
-详见 `processor/query_processor/RENAME.md`。
+图编排与条件路由见 `processor/query_processor/main_graph.py`，各闸口逻辑（闲聊拦截、实体确认、清单/元数据、主题一致性）与节点实现位于 `processor/query_processor/`。
 
 检索模块负责：
 
 1. 分析用户问题和会话上下文。
-2. 执行本地向量召回。
-3. 按配置启用 HyDE 或联网搜索。
-4. 使用 RRF 合并不同检索结果。
-5. 使用 Reranker 重新排序。
-6. 整理来源、图片和文档元数据。
-7. 生成最终回答或流式增量回答。
+2. 在问题准备阶段执行闲聊拦截、实体确认、清单/元数据与主题一致性等闸口判定。
+3. 执行本地向量召回。
+4. 按配置启用 HyDE 或联网搜索。
+5. 使用 RRF 合并不同检索结果。
+6. 使用 Reranker 重新排序。
+7. 整理来源、图片和文档元数据。
+8. 生成最终回答或流式增量回答。
 
 ## 7. 配置与运行
 
@@ -103,5 +113,5 @@ Processor 通常由后端导入任务或问答接口调用，不建议单独启�
 1. 将知识库权限范围作为 Processor 的强制输入和检索过滤条件。
 2. 强化实体识别与商品范围过滤，减少跨商品图片和内容串入回答。
 3. 建立导入和问答的节点级耗时、失败率、召回质量监控。
-4. 增加离线评测集，评估召回准确率、引用准确率和图片相关性。
+4. 扩充离线评测（`eval/` 已有 RAGAS 评测与实体出口探针脚本），评估召回准确率、引用准确率和图片相关性。
 5. 支持更细粒度的文档版本、增量导入和向量删除。

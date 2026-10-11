@@ -19,8 +19,10 @@ src/
 ├─ composables/   请求、分页、表格、弹窗和问答状态逻辑
 ├─ store/         Pinia 应用状态和用户认证状态
 ├─ router/        路由配置和登录访问控制
+├─ constants/     全局常量与枚举定义
 ├─ types/         用户端和接口数据类型
 ├─ utils/         请求、日期、格式化、校验、本地存储工具
+├─ assets/        图片等静态资源
 └─ style/         全局变量、重置、公共样式和布局样式
 ```
 
@@ -98,7 +100,7 @@ npm.cmd run preview
 - 页面业务逻辑优先放在页面或组合式函数中，API 调用统一放在 `src/api/`。
 - 公共数据结构优先维护在 `src/types/`，避免页面内重复定义。
 - 用户端和管理端样式应遵循现有 TDesign 风格，不随意改变整体布局。
-- Vue、TypeScript、Less 文件按 `tmp/注释规范.md` 保持文件头和核心业务注释。
+- Vue、TypeScript、Less 文件保持与现有代码一致的文件头说明和核心业务注释。
 - 修改输入框、会话列表、消息渲染时，要同时考虑键盘操作、流式状态、移动端高度和滚动行为。
 - 前端构建使用 `npm.cmd run build`，不要依赖 PowerShell 的 `npm.ps1`。
 

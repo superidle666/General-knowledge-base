@@ -25,6 +25,12 @@ __pycache__/
 test/
 playground/
 
+# Evaluation harness and pytest suite (root-level dev tooling, kept local)
+# 注意：这两项目录此前已被 Git 跟踪，仅加入 .gitignore 不会停止跟踪，
+# 需要执行 `git rm -r --cached eval tests` 才会从版本库移除（保留本地文件）。
+/eval/
+/tests/
+
 # IDE and OS files
 .idea/
 .vscode/

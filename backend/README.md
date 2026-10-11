@@ -15,12 +15,14 @@ backend/
 │  ├─ query.py             用户端知识库、会话、问答和 SSE
 │  ├─ mysql.py             管理端用户、角色、权限、知识库、文档、任务、日志
 │  ├─ settings.py          系统设置读取与维护
+│  ├─ library_facts.py     库级元问题事实读取层（元数据闸数据源，供 query/mysql 复用，非路由）
 │  └─ schemas.py           Pydantic 请求和响应模型
 ├─ app/core/
 │  ├─ auth.py              JWT、密码哈希、用户解析、权限依赖
 │  ├─ permissions.py       权限注册表和权限展开
 │  ├─ audit.py             操作审计上下文和日志
 │  ├─ config.py             环境变量和应用配置
+│  ├─ path_utils.py        上传与图片目录名的安全清洗（slug）工具
 │  └─ system_settings.py   加密系统设置同步
 ├─ app/db/
 │  ├─ models.py            SQLAlchemy 数据模型
@@ -62,6 +64,7 @@ backend/
 - `POST /sessions`：创建会话。
 - `GET /sessions`：查询会话列表。
 - `GET /sessions/{id}/messages`：读取会话消息。
+- `PATCH /sessions/{id}`：重命名会话。
 - `DELETE /sessions/{id}`：删除会话。
 - `POST /`：普通问答。
 - `POST /stream`：SSE 流式问答。
@@ -141,5 +144,5 @@ uv run uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 1. 将知识库成员关系真正落实到知识库列表、会话创建、历史读取和检索链路。
 2. 支持指定用户和角色的知识库授权、批量授权、撤销和有效期。
 3. 完善权限变更审计和越权访问拦截日志。
-4. 增加 API 集成测试、认证测试、导入任务测试和检索链路测试。
+4. 在 `tests/` 现有 pytest 套件基础上补充 API 集成测试、认证测试和检索链路联调用例。
 5. 完善后台任务监控、失败重试、超时回收和分布式部署能力。
